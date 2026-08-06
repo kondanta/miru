@@ -1,0 +1,36 @@
+# Binary
+/miru
+
+# Config
+/config.toml
+.env
+memory/
+
+# Go
+vendor/
+
+# Vue UI build output
+web/dist/*
+!web/dist/.gitkeep
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# mise
+.mise/config.lock
+
+# Claude
+.claude/
+
+# Ignore secrets
+*.pem
+*.key
+
+# GitHub — allow workflows and zizmor config
+.github/*
+!.github/workflows
+!.github/workflows/**
+!.github/zizmor.yml

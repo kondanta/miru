@@ -1,0 +1,51 @@
+[tools]
+go = "1.26.5"
+golangci-lint = "2.12.2"
+goreleaser = "2.17.1"
+zizmor = "1.29.0"
+
+[tasks.build]
+description = "Build the miru binary"
+run = "go build ./..."
+
+[tasks.build-ui]
+description = "Build the Vue 3 SPA — path TBD when frontend is scaffolded"
+run = "echo 'build-ui: frontend source path not yet decided'"
+
+[tasks.test]
+description = "Run tests with race detection"
+run = "go test -race ./..."
+
+[tasks.test-fresh]
+description = "Run tests bypassing the result cache"
+run = "go test -race -count=1 ./..."
+
+[tasks.vet]
+description = "Run go vet"
+run = "go vet ./..."
+
+[tasks.lint]
+description = "Run golangci-lint"
+run = "golangci-lint run"
+
+[tasks.ci]
+description = "Full local CI suite"
+run = """
+go build ./...
+go test -race ./...
+go vet ./...
+golangci-lint run
+"""
+
+[tasks.ci-fresh]
+description = "Full local CI suite, bypassing test cache"
+run = """
+go build ./...
+go test -race -count=1 ./...
+go vet ./...
+golangci-lint run
+"""
+
+[tasks.zizmor]
+description = "Scan GitHub Actions workflows for security issues"
+run = "zizmor .github/workflows/"

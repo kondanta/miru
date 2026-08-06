@@ -1,0 +1,20 @@
+services:
+  miru:
+    image: ghcr.io/kondanta/miru:latest
+    restart: unless-stopped
+    ports:
+      - "8090:8090"
+    volumes:
+      - ./data:/data
+      - ./downloads:/downloads
+    environment:
+      MIRU_PORT: 8090
+      MIRU_DATA_DIR: /data
+      MIRU_DOWNLOADS_DIR: /downloads
+      # Optional: OIDC app login
+      # MIRU_OIDC_ISSUER: https://auth.example.com/application/o/miru/
+      # MIRU_OIDC_CLIENT_ID: ""
+      # MIRU_OIDC_CLIENT_SECRET: ""
+      # Required for Watch Later: Google OAuth app credentials
+      # MIRU_GOOGLE_CLIENT_ID: ""
+      # MIRU_GOOGLE_CLIENT_SECRET: ""
