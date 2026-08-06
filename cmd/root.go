@@ -14,7 +14,7 @@ import (
 //	go build -ldflags "-X github.com/kondanta/miru/cmd.version=1.2.3"
 var version = "dev"
 
-// Execute builds the command tree and runs it. Called from main.
+// Execute builds and runs the miru command tree, displaying help when no subcommand is provided and supporting version output.
 func Execute() {
 	rootCmd := &cobra.Command{
 		Use:           "miru",

@@ -16,6 +16,7 @@ var dist embed.FS
 // Import this from internal/server to serve the frontend.
 var DistDirFS = mustSubFS(dist, "dist")
 
+// mustSubFS returns an embedded filesystem rooted at dir and panics if dir cannot be found.
 func mustSubFS(f embed.FS, dir string) fs.FS {
 	sub, err := fs.Sub(f, dir)
 	if err != nil {

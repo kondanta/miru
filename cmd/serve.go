@@ -6,6 +6,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// serveCmd creates the command that starts the Miru HTTP server.
 func serveCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "serve",
