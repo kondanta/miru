@@ -10,14 +10,14 @@ CREATE TABLE users (
 );
 
 CREATE TABLE youtube_tokens (
-    user_id       TEXT NOT NULL PRIMARY KEY REFERENCES users (id),
+    user_id       TEXT PRIMARY KEY REFERENCES users (id),
     access_token  TEXT NOT NULL,
     refresh_token TEXT NOT NULL,
     expiry        TEXT NOT NULL
 );
 
 CREATE TABLE watch_later_configs (
-    user_id   TEXT    NOT NULL PRIMARY KEY REFERENCES users (id),
+    user_id   TEXT    PRIMARY KEY REFERENCES users (id),
     enabled   INTEGER NOT NULL DEFAULT 0,
     poll_cron TEXT    NOT NULL DEFAULT '*/15 * * * *'
 );
@@ -28,7 +28,7 @@ CREATE TABLE downloads (
     youtube_id       TEXT    NOT NULL,
     title            TEXT    NOT NULL,
     file_path        TEXT,
-    status           TEXT    NOT NULL CHECK (status IN ('queued', 'downloading', 'done', 'failed', 'deleted')),
+    status           TEXT    NOT NULL,
     quality          TEXT    NOT NULL,
     sponsorblock     INTEGER NOT NULL,
     source           TEXT    NOT NULL,
@@ -50,7 +50,7 @@ CREATE TABLE webhooks (
 );
 
 CREATE TABLE jellyfin_configs (
-    user_id    TEXT NOT NULL PRIMARY KEY REFERENCES users (id),
+    user_id    TEXT PRIMARY KEY REFERENCES users (id),
     url        TEXT NOT NULL,
     api_key    TEXT NOT NULL,
     library_id TEXT NOT NULL
