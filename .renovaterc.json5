@@ -1,0 +1,34 @@
+{
+  $schema: 'https://docs.renovatebot.com/renovate-schema.json',
+  extends: [
+    'abandonments:recommended',
+    'config:recommended',
+    'docker:enableMajor',
+    'helpers:pinGitHubActionDigests',
+    ':automergeBranch',
+    ':configMigration',
+    ':disableRateLimiting',
+    ':semanticCommits',
+    ':timezone(Europe/Oslo)',
+  ],
+  rebaseWhen: 'behind-base-branch',
+  dependencyDashboardTitle: "SirMergington's Estate 🤖",
+  reviewers: [
+    'kondanta',
+  ],
+  suppressNotifications: [
+    'prEditedNotification',
+    'prIgnoreNotification',
+  ],
+  prBodyTemplate: '{{{table}}}{{{notes}}}{{{controls}}}',
+  prBodyNotes: [
+    '{{#if (and isGroup hasReleaseNotes)}}## Release Notes\n{{#each upgrades as |upgrade|}}\n{{#if upgrade.hasReleaseNotes}}\n<details>\n<summary>{{upgrade.githubName}}</summary>\n\n{{#each upgrade.releases as |release|}}\n{{#if release.releaseNotes}}\n### [`{{{release.version}}}`]({{{release.releaseNotes.url}}})\n\n{{/if}}\n{{/each}}\n\n</details>\n{{/if}}\n{{/each}}\n{{/if}}',
+    '{{#if hasReleaseNotes}}{{#unless isGroup}}<details>\n<summary>Release Notes</summary>\n\n{{#each releases as |release|}}\n{{#if release.releaseNotes}}\n### [{{#if release.releaseNotes.name}}{{{release.releaseNotes.name}}}{{else}}`{{{release.version}}}`{{/if}}]({{{release.releaseNotes.url}}})\n\n{{/if}}\n{{/each}}\n</details>\n{{/unless}}\n{{/if}}',
+  ],
+  enabledManagers: [
+    'gomod',
+    'dockerfile',
+    'docker-compose',
+    'github-actions',
+  ],
+}
