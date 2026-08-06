@@ -1,0 +1,13 @@
+FROM alpine:3.24
+# yt-dlp is NOT installed here — managed at runtime by internal/downloader.
+RUN apk add --no-cache ca-certificates tzdata \
+    && addgroup -g 1000 miru \
+    && adduser -D -u 1000 -G miru miru
+
+WORKDIR /app
+COPY miru /app/miru
+
+USER miru
+EXPOSE 8090
+ENTRYPOINT ["/app/miru"]
+CMD ["serve"]
