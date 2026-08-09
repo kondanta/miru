@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"embed"
 	"errors"
@@ -15,8 +16,9 @@ import (
 var migrationFiles embed.FS
 
 // Migrate runs all pending up migrations. It is idempotent: calling it when
-// the schema is already current returns nil.
-func Migrate(db *sql.DB) error {
+// the schema is already current returns nil. Cancelling ctx signals a graceful
+// stop; the migrator will finish any in-progress step and then return.
+func Migrate(ctx context.Context, db *sql.DB) error {
 	src, err := iofs.New(migrationFiles, "migrations")
 	if err != nil {
 		return fmt.Errorf("create migration source: %w", err)
@@ -31,6 +33,16 @@ func Migrate(db *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("create migrator: %w", err)
 	}
+
+	stop := make(chan bool, 1)
+	go func() {
+		select {
+		case <-ctx.Done():
+			m.GracefulStop <- true
+		case <-stop:
+		}
+	}()
+	defer close(stop)
 
 	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
 		return fmt.Errorf("run migrations: %w", err)

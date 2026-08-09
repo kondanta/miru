@@ -151,7 +151,7 @@ Schema lives in `docs/ARCHITECTURE.md` (authoritative) and is reflected in
 `watch_later_configs`, `downloads`, `webhooks`, `jellyfin_configs`.
 
 Rules:
-- Every schema change requires a new numbered migration file in `migrations/`.
+- Every schema change requires a new numbered migration file in `internal/db/migrations/`.
 - Never edit an existing migration — add a new one.
 - sqlc-generated code lives in `internal/db/` and is re-generated via `sqlc generate`.
 - All timestamps stored as RFC3339 TEXT. No Unix integers.
