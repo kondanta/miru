@@ -17,7 +17,8 @@ const driverName = "sqlite"
 // pool is configured with foreign-key enforcement, WAL journal mode, and a
 // busy-timeout so concurrent writers queue rather than fail immediately.
 func Open(ctx context.Context, path string) (*sql.DB, error) {
-	dsn := "file:" + url.PathEscape(path) + "?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"
+	dsn := "file:" + url.PathEscape(path) +
+		"?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"
 
 	db, err := sql.Open(driverName, dsn)
 	if err != nil {

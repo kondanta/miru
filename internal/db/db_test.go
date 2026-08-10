@@ -94,8 +94,10 @@ func TestStatusCheckConstraint(t *testing.T) {
 	}
 
 	// Seed a user so the FK constraint doesn't fire first.
-	_, err = db.ExecContext(t.Context(),
-		`INSERT INTO users (id, username, created_at) VALUES ('u1', 'testuser', '2026-01-01T00:00:00Z')`)
+	_, err = db.ExecContext(
+		t.Context(),
+		`INSERT INTO users (id, username, created_at) VALUES ('u1', 'testuser', '2026-01-01T00:00:00Z')`,
+	)
 	if err != nil {
 		t.Fatalf("insert user: %v", err)
 	}
