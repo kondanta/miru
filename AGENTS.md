@@ -62,7 +62,7 @@ miru/
 ├── web/
 │   ├── embed.go                 # //go:embed all:dist, exports DistDirFS
 │   └── dist/                    # Vite build output (gitignored, .gitkeep only)
-├── migrations/                  # SQL migration files (golang-migrate)
+├── internal/db/migrations/      # SQL migration files (golang-migrate)
 ├── docs/
 │   └── docs/ARCHITECTURE.md          # Authoritative design doc — read before
 │                                #   implementing any subsystem
@@ -146,12 +146,12 @@ If you think a new dependency is justified, stop and ask. Do not `go get` it fir
 
 ## Database
 
-Schema lives in `docs/ARCHITECTURE.md` (authoritative) and will be reflected in
-`migrations/`. Tables: `users`, `youtube_tokens`, `watch_later_configs`,
-`downloads`, `webhooks`, `jellyfin_configs`.
+Schema lives in `docs/ARCHITECTURE.md` (authoritative) and is reflected in
+`internal/db/migrations/`. Tables: `users`, `youtube_tokens`,
+`watch_later_configs`, `downloads`, `webhooks`, `jellyfin_configs`.
 
 Rules:
-- Every schema change requires a new numbered migration file in `migrations/`.
+- Every schema change requires a new numbered migration file in `internal/db/migrations/`.
 - Never edit an existing migration — add a new one.
 - sqlc-generated code lives in `internal/db/` and is re-generated via `sqlc generate`.
 - All timestamps stored as RFC3339 TEXT. No Unix integers.
