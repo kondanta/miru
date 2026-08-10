@@ -1,10 +1,34 @@
 package db
 
 import (
+	"database/sql"
+	"errors"
+	"fmt"
 	"testing"
+
+	sqlite "modernc.org/sqlite"
 )
 
-func TestOpenAndMigrate(t *testing.T) {
+// Extended SQLite result codes. modernc.org/sqlite always enables extended
+// result codes via sqlite3_extended_result_codes, so Code() returns these.
+const (
+	sqliteConstraintForeignKey = 787 // SQLITE_CONSTRAINT_FOREIGNKEY
+	sqliteConstraintCheck      = 275 // SQLITE_CONSTRAINT_CHECK
+)
+
+func requireSQLiteCode(t *testing.T, err error, wantCode int) {
+	t.Helper()
+	sqlErr, ok := errors.AsType[*sqlite.Error](err)
+	if !ok {
+		t.Fatalf("expected *sqlite.Error, got %T: %v", err, err)
+	}
+	if sqlErr.Code() != wantCode {
+		t.Errorf("expected SQLite error code %d, got %d (%v)", wantCode, sqlErr.Code(), err)
+	}
+}
+
+func openMigrated(t *testing.T) *sql.DB {
+	t.Helper()
 	db, err := Open(t.Context(), ":memory:")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -14,10 +38,14 @@ func TestOpenAndMigrate(t *testing.T) {
 			t.Errorf("Close: %v", err)
 		}
 	})
-
 	if err := Migrate(t.Context(), db); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
+	return db
+}
+
+func TestOpenAndMigrate(t *testing.T) {
+	db := openMigrated(t)
 
 	// Idempotency: second call must not error.
 	if err := Migrate(t.Context(), db); err != nil {
@@ -52,49 +80,25 @@ func TestOpenAndMigrate(t *testing.T) {
 }
 
 func TestForeignKeysEnforced(t *testing.T) {
-	db, err := Open(t.Context(), ":memory:")
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := db.Close(); err != nil {
-			t.Errorf("Close: %v", err)
-		}
-	})
+	db := openMigrated(t)
 
-	if err := Migrate(t.Context(), db); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-
-	// Inserting a download with a non-existent user_id must fail.
-	_, err = db.ExecContext(
+	_, err := db.ExecContext(
 		t.Context(),
 		`INSERT INTO downloads
 		 (id, user_id, youtube_id, title, status, quality, sponsorblock, source, created_at, updated_at)
 		 VALUES ('d1', 'no-such-user', 'yt1', 'title', 'queued', '1080p', 1, 'manual', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 	)
 	if err == nil {
-		t.Error("expected foreign-key violation, got nil")
+		t.Fatal("expected foreign-key violation, got nil")
 	}
+	requireSQLiteCode(t, err, sqliteConstraintForeignKey)
 }
 
 func TestStatusCheckConstraint(t *testing.T) {
-	db, err := Open(t.Context(), ":memory:")
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := db.Close(); err != nil {
-			t.Errorf("Close: %v", err)
-		}
-	})
+	db := openMigrated(t)
 
-	if err := Migrate(t.Context(), db); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-
-	// Seed a user so the FK constraint doesn't fire first.
-	_, err = db.ExecContext(
+	// Seed a user so the FK constraint doesn't fire before the CHECK.
+	_, err := db.ExecContext(
 		t.Context(),
 		`INSERT INTO users (id, username, created_at) VALUES ('u1', 'testuser', '2026-01-01T00:00:00Z')`,
 	)
@@ -102,12 +106,27 @@ func TestStatusCheckConstraint(t *testing.T) {
 		t.Fatalf("insert user: %v", err)
 	}
 
-	// An invalid status must be rejected.
-	_, err = db.ExecContext(t.Context(),
-		`INSERT INTO downloads
+	const insertDownload = `INSERT INTO downloads
 		 (id, user_id, youtube_id, title, status, quality, sponsorblock, source, created_at, updated_at)
-		 VALUES ('d1', 'u1', 'yt1', 'title', 'invalid', '1080p', 1, 'manual', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`)
-	if err == nil {
-		t.Error("expected CHECK constraint violation for invalid status, got nil")
+		 VALUES (?, 'u1', 'yt1', 'title', ?, '1080p', 1, 'manual', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`
+
+	// All valid statuses must be accepted.
+	for i, status := range []string{"queued", "downloading", "done", "failed", "deleted"} {
+		t.Run("valid/"+status, func(t *testing.T) {
+			id := fmt.Sprintf("d%d", i)
+			_, err := db.ExecContext(t.Context(), insertDownload, id, status)
+			if err != nil {
+				t.Errorf("expected success for status %q, got: %v", status, err)
+			}
+		})
 	}
+
+	// An invalid status must be rejected with a CHECK constraint error.
+	t.Run("invalid", func(t *testing.T) {
+		_, err := db.ExecContext(t.Context(), insertDownload, "dinvalid", "invalid")
+		if err == nil {
+			t.Fatal("expected CHECK constraint violation, got nil")
+		}
+		requireSQLiteCode(t, err, sqliteConstraintCheck)
+	})
 }
