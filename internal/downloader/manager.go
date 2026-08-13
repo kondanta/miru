@@ -45,23 +45,37 @@ type Manager struct {
 	httpClient     *http.Client
 	log            *slog.Logger
 	mu             sync.RWMutex // guards the binary on disk and pinnedVersion during updates
+	wg             sync.WaitGroup
 }
 
 // New creates a Manager that stores the yt-dlp binary inside dataDir.
 // No I/O is performed until EnsureReady is called.
 func New(dataDir string, log *slog.Logger) *Manager {
+	// Clone DefaultTransport to inherit proxy, HTTP/2, and TLS settings.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = 30 * time.Second
+
 	return &Manager{
 		binPath:        filepath.Join(dataDir, "yt-dlp"),
 		releaseBaseURL: githubReleasesBaseURL,
 		httpClient: &http.Client{
-			// ResponseHeaderTimeout prevents hung connections while still
-			// allowing large binary downloads to stream without a deadline.
-			Transport: &http.Transport{
-				ResponseHeaderTimeout: 30 * time.Second,
+			Transport: transport,
+			// Reject HTTPS→HTTP redirects to prevent MITM attacks during binary download.
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if len(via) > 0 && via[0].URL.Scheme == "https" && req.URL.Scheme == "http" {
+					return fmt.Errorf("redirect from https to http rejected")
+				}
+				return nil
 			},
 		},
 		log: log,
 	}
+}
+
+// Close waits for the background update goroutine to finish.
+// Cancel the context passed to EnsureReady before calling Close.
+func (m *Manager) Close() {
+	m.wg.Wait()
 }
 
 // EnsureReady guarantees a working yt-dlp binary is available before returning.
@@ -93,7 +107,7 @@ func (m *Manager) EnsureReady(ctx context.Context) error {
 		return err
 	}
 
-	go m.checkForUpdate(ctx)
+	m.wg.Go(func() { m.checkForUpdate(ctx) })
 
 	return nil
 }
@@ -112,21 +126,35 @@ func (m *Manager) SetVersion(ctx context.Context, tag string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if err := os.Rename(m.binPath, backup); err != nil {
-		return fmt.Errorf("back up yt-dlp before version switch: %w", err)
+	// Rename the existing binary to backup; if there is no binary yet (fresh
+	// install), skip the rename and flag that there is nothing to roll back to.
+	hasBackup := true
+	if renameErr := os.Rename(m.binPath, backup); renameErr != nil {
+		if !errors.Is(renameErr, os.ErrNotExist) {
+			return fmt.Errorf("back up yt-dlp before version switch: %w", renameErr)
+		}
+		hasBackup = false
 	}
 
 	if err := downloadBinary(ctx, m.httpClient, dlURL, m.binPath); err != nil {
-		m.recoverBinary(ctx, backup, dlURL)
+		if hasBackup {
+			m.recoverBinary(ctx, backup, dlURL)
+		}
 		return fmt.Errorf("install yt-dlp %q: %w", tag, err)
 	}
 
 	if err := m.smokeTest(ctx); err != nil {
-		m.recoverBinary(ctx, backup, dlURL)
+		if hasBackup {
+			// Pass "" so recoverBinary does not re-download the binary that just
+			// failed the smoke test — downloading it again would yield the same result.
+			m.recoverBinary(ctx, backup, "")
+		}
 		return fmt.Errorf("smoke test yt-dlp %q: %w", tag, err)
 	}
 
-	_ = os.Remove(backup)
+	if hasBackup {
+		_ = os.Remove(backup)
+	}
 	m.pinnedVersion = tag
 	m.log.Info("yt-dlp version set", "version", tag)
 
@@ -136,10 +164,16 @@ func (m *Manager) SetVersion(ctx context.Context, tag string) error {
 // Download invokes yt-dlp for a single video URL, writing all output lines to
 // progress. The caller is responsible for constructing outDir (typically
 // config.DownloadsDir/username). Context cancellation aborts the subprocess.
-func (m *Manager) Download(ctx context.Context, url, outDir string, opts DownloadOpts, progress io.Writer) error {
+func (m *Manager) Download(
+	ctx context.Context, rawURL, outDir string, opts DownloadOpts, progress io.Writer,
+) error {
 	format, ok := qualityFormats[opts.Quality]
 	if !ok {
 		return fmt.Errorf("unknown quality %q", opts.Quality)
+	}
+
+	if !strings.HasPrefix(rawURL, "https://") && !strings.HasPrefix(rawURL, "http://") {
+		return fmt.Errorf("url must use http or https scheme")
 	}
 
 	args := []string{
@@ -159,7 +193,9 @@ func (m *Manager) Download(ctx context.Context, url, outDir string, opts Downloa
 		args = append(args, "--write-info-json")
 	}
 
-	args = append(args, url)
+	// "--" separates yt-dlp flags from the URL so a URL beginning with "-"
+	// cannot be parsed as a flag by yt-dlp.
+	args = append(args, "--", rawURL)
 
 	// Hold the read lock through Start so that a concurrent update cannot
 	// rename the binary between when we capture the path and when the kernel
@@ -205,13 +241,28 @@ func (m *Manager) checkForUpdate(ctx context.Context) {
 		return
 	}
 
-	out, err := exec.CommandContext(ctx, m.binPath, "--version").Output()
-	if err != nil {
+	// Hold RLock through Start (same pattern as Download) to prevent a concurrent
+	// SetVersion from renaming the binary while the kernel opens the exec.
+	var versionBuf strings.Builder
+
+	versionCmd := exec.CommandContext(ctx, m.binPath, "--version")
+	versionCmd.Stdout = &versionBuf
+
+	m.mu.RLock()
+	startErr := versionCmd.Start()
+	m.mu.RUnlock()
+
+	if startErr != nil {
+		m.log.Warn("yt-dlp update check: could not read current version", "err", startErr)
+		return
+	}
+
+	if err := versionCmd.Wait(); err != nil {
 		m.log.Warn("yt-dlp update check: could not read current version", "err", err)
 		return
 	}
 
-	current := strings.TrimSpace(string(out))
+	current := strings.TrimSpace(versionBuf.String())
 	if current == tag {
 		m.log.Debug("yt-dlp is up to date", "version", tag)
 		return
@@ -238,7 +289,9 @@ func (m *Manager) checkForUpdate(ctx context.Context) {
 
 	if err := m.smokeTest(ctx); err != nil {
 		m.log.Warn("yt-dlp update: smoke test failed, rolling back", "err", err)
-		m.recoverBinary(ctx, backup, dlURL)
+		// Pass "" so recoverBinary does not re-download the binary that just
+		// failed the smoke test.
+		m.recoverBinary(ctx, backup, "")
 
 		return
 	}
@@ -247,19 +300,24 @@ func (m *Manager) checkForUpdate(ctx context.Context) {
 	m.log.Info("yt-dlp updated", "version", tag)
 }
 
-// recoverBinary is called when an update fails after the old binary has been
-// moved to backup. It first attempts to restore the backup via rename; if that
-// fails it re-downloads dlURL as a last resort. Failure at every step is logged
-// at Error — the binary will be unavailable until EnsureReady runs again on
-// the next application restart.
+// recoverBinary attempts to restore the binary after a failed update.
+// It first tries to rename backup back to binPath. If that fails and dlURL is
+// non-empty, it re-downloads as a last resort. Pass dlURL="" when the binary at
+// that URL is already known to be bad (e.g. it failed a smoke test) — re-downloading
+// it would only install the same broken binary again.
 func (m *Manager) recoverBinary(ctx context.Context, backup, dlURL string) {
-	rerr := os.Rename(backup, m.binPath)
-	if rerr == nil {
+	err := os.Rename(backup, m.binPath)
+	if err == nil {
 		m.log.Info("yt-dlp rolled back to previous version")
 		return
 	}
 
-	m.log.Error("yt-dlp rollback via rename failed, attempting re-download", "err", rerr)
+	m.log.Error("yt-dlp rollback via rename failed", "err", err)
+
+	if dlURL == "" {
+		m.log.Error("yt-dlp recovery: binary is known bad; will not re-download; restart the application to retry")
+		return
+	}
 
 	if err := downloadBinary(ctx, m.httpClient, dlURL, m.binPath); err != nil {
 		m.log.Error(

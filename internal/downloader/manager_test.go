@@ -240,6 +240,17 @@ func TestDownload_UnknownQuality(t *testing.T) {
 	}
 }
 
+func TestDownload_InvalidScheme(t *testing.T) {
+	m := New(t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	for _, rawURL := range []string{"ftp://example.com", "file:///etc/passwd", "-evil-flag", ""} {
+		err := m.Download(t.Context(), rawURL, t.TempDir(), DownloadOpts{Quality: "720p"}, nil)
+		if err == nil {
+			t.Fatalf("expected error for URL %q, got nil", rawURL)
+		}
+	}
+}
+
 func TestDownload_Args(t *testing.T) {
 	dir := t.TempDir()
 	outDir := t.TempDir()
@@ -305,8 +316,17 @@ func TestDownload_Args(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			// Clear argsFile so stale args from a previous subtest cannot satisfy
+			// this test's assertions.
+			_ = os.Remove(argsFile)
+
 			m := New(dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
-			_ = m.Download(context.Background(), "https://example.com/watch?v=test", outDir, tc.opts, nil)
+			err := m.Download(
+				context.Background(), "https://example.com/watch?v=test", outDir, tc.opts, nil,
+			)
+			if err != nil {
+				t.Fatalf("Download: %v", err)
+			}
 
 			raw, err := os.ReadFile(argsFile)
 			if err != nil {
