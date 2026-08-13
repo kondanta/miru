@@ -2,7 +2,10 @@ package downloader
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -123,15 +126,15 @@ func TestFetchRelease(t *testing.T) {
 
 	srv := releaseServer(t, tag, "#!/bin/sh\necho fake\n")
 
-	gotTag, gotURL, err := fetchRelease(context.Background(), &http.Client{}, srv.URL, "")
+	ri, err := fetchRelease(context.Background(), &http.Client{}, srv.URL, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if gotTag != tag {
-		t.Errorf("tag: got %q, want %q", gotTag, tag)
+	if ri.tag != tag {
+		t.Errorf("tag: got %q, want %q", ri.tag, tag)
 	}
-	if !strings.HasPrefix(gotURL, srv.URL) {
-		t.Errorf("downloadURL %q does not point to test server", gotURL)
+	if !strings.HasPrefix(ri.downloadURL, srv.URL) {
+		t.Errorf("downloadURL %q does not point to test server", ri.downloadURL)
 	}
 }
 
@@ -140,12 +143,12 @@ func TestFetchRelease_ExplicitTag(t *testing.T) {
 
 	srv := releaseServer(t, tag, "#!/bin/sh\necho fake\n")
 
-	gotTag, _, err := fetchRelease(context.Background(), &http.Client{}, srv.URL, tag)
+	ri, err := fetchRelease(context.Background(), &http.Client{}, srv.URL, tag)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if gotTag != tag {
-		t.Errorf("tag: got %q, want %q", gotTag, tag)
+	if ri.tag != tag {
+		t.Errorf("tag: got %q, want %q", ri.tag, tag)
 	}
 }
 
@@ -159,13 +162,13 @@ func TestFetchRelease_MissingAsset(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	_, _, err := fetchRelease(context.Background(), &http.Client{}, srv.URL, "")
+	_, err := fetchRelease(context.Background(), &http.Client{}, srv.URL, "")
 	if err == nil {
 		t.Fatal("expected error for release with no matching asset, got nil")
 	}
 }
 
-func TestDownloadBinary(t *testing.T) {
+func TestDownloadAndInstall(t *testing.T) {
 	const content = "#!/bin/sh\necho fake-yt-dlp\n"
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -174,8 +177,9 @@ func TestDownloadBinary(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	dest := filepath.Join(t.TempDir(), "yt-dlp")
+	ri := releaseInfo{downloadURL: srv.URL} // checksumURL empty → verification skipped
 
-	if err := downloadBinary(context.Background(), &http.Client{}, srv.URL, dest); err != nil {
+	if err := downloadAndInstall(context.Background(), &http.Client{}, ri, dest); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -190,6 +194,45 @@ func TestDownloadBinary(t *testing.T) {
 	got, _ := os.ReadFile(dest)
 	if string(got) != content {
 		t.Errorf("binary content: got %q, want %q", string(got), content)
+	}
+}
+
+func TestVerifyChecksum(t *testing.T) {
+	const content = "#!/bin/sh\necho fake-yt-dlp\n"
+	const name = "yt-dlp"
+
+	h := sha256.Sum256([]byte(content))
+	good := hex.EncodeToString(h[:])
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprintf(w, "%s  %s\n", good, name)
+	}))
+	t.Cleanup(srv.Close)
+
+	tmpPath := filepath.Join(t.TempDir(), "yt-dlp.tmp")
+	if err := os.WriteFile(tmpPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ri := releaseInfo{assetName: name, checksumURL: srv.URL}
+
+	// Valid checksum.
+	if err := verifyChecksum(t.Context(), &http.Client{}, ri, tmpPath); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Tampered binary.
+	if err := os.WriteFile(tmpPath, []byte("tampered"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyChecksum(t.Context(), &http.Client{}, ri, tmpPath); err == nil {
+		t.Fatal("expected error for mismatched checksum, got nil")
+	}
+
+	// Empty checksumURL → skipped, no error.
+	ri.checksumURL = ""
+	if err := verifyChecksum(t.Context(), &http.Client{}, ri, tmpPath); err != nil {
+		t.Fatalf("expected nil for empty checksumURL, got: %v", err)
 	}
 }
 

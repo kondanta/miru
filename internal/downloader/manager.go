@@ -90,12 +90,12 @@ func (m *Manager) EnsureReady(ctx context.Context) error {
 	case errors.Is(err, os.ErrNotExist):
 		m.log.Info("yt-dlp binary not found, downloading latest release")
 
-		_, dlURL, ferr := fetchRelease(ctx, m.httpClient, m.releaseBaseURL, "")
+		ri, ferr := fetchRelease(ctx, m.httpClient, m.releaseBaseURL, "")
 		if ferr != nil {
 			return fmt.Errorf("fetch yt-dlp release: %w", ferr)
 		}
 
-		if ferr := downloadBinary(ctx, m.httpClient, dlURL, m.binPath); ferr != nil {
+		if ferr := downloadAndInstall(ctx, m.httpClient, ri, m.binPath); ferr != nil {
 			return fmt.Errorf("install yt-dlp: %w", ferr)
 		}
 
@@ -116,9 +116,21 @@ func (m *Manager) EnsureReady(ctx context.Context) error {
 // Pass "latest" or "" to switch back to tracking the latest release.
 // Blocks until the version is installed and smoke-tested.
 func (m *Manager) SetVersion(ctx context.Context, tag string) error {
-	_, dlURL, err := fetchRelease(ctx, m.httpClient, m.releaseBaseURL, tag)
+	ri, err := fetchRelease(ctx, m.httpClient, m.releaseBaseURL, tag)
 	if err != nil {
 		return fmt.Errorf("fetch yt-dlp release %q: %w", tag, err)
+	}
+
+	// Download and verify outside the lock: the network transfer must not block
+	// concurrent Download calls for its duration.
+	tmpPath, err := downloadToTemp(ctx, m.httpClient, ri.downloadURL, filepath.Dir(m.binPath))
+	if err != nil {
+		return fmt.Errorf("download yt-dlp %q: %w", tag, err)
+	}
+	defer func() { _ = os.Remove(tmpPath) }() // no-op after successful Rename
+
+	if err := verifyChecksum(ctx, m.httpClient, ri, tmpPath); err != nil {
+		return fmt.Errorf("yt-dlp %q checksum: %w", tag, err)
 	}
 
 	backup := m.binPath + ".bak"
@@ -136,18 +148,17 @@ func (m *Manager) SetVersion(ctx context.Context, tag string) error {
 		hasBackup = false
 	}
 
-	if err := downloadBinary(ctx, m.httpClient, dlURL, m.binPath); err != nil {
+	if err := installBinary(tmpPath, m.binPath); err != nil {
 		if hasBackup {
-			m.recoverBinary(ctx, backup, dlURL)
+			m.recoverBinary(ctx, backup, ri, false)
 		}
 		return fmt.Errorf("install yt-dlp %q: %w", tag, err)
 	}
 
 	if err := m.smokeTest(ctx); err != nil {
 		if hasBackup {
-			// Pass "" so recoverBinary does not re-download the binary that just
-			// failed the smoke test — downloading it again would yield the same result.
-			m.recoverBinary(ctx, backup, "")
+			// skipRedownload=true: the binary at ri.downloadURL already proved broken.
+			m.recoverBinary(ctx, backup, ri, true)
 		}
 		return fmt.Errorf("smoke test yt-dlp %q: %w", tag, err)
 	}
@@ -235,7 +246,7 @@ func (m *Manager) checkForUpdate(ctx context.Context) {
 	version := m.pinnedVersion
 	m.mu.RUnlock()
 
-	tag, dlURL, err := fetchRelease(ctx, m.httpClient, m.releaseBaseURL, version)
+	ri, err := fetchRelease(ctx, m.httpClient, m.releaseBaseURL, version)
 	if err != nil {
 		m.log.Warn("yt-dlp update check failed", "err", err)
 		return
@@ -263,12 +274,26 @@ func (m *Manager) checkForUpdate(ctx context.Context) {
 	}
 
 	current := strings.TrimSpace(versionBuf.String())
-	if current == tag {
-		m.log.Debug("yt-dlp is up to date", "version", tag)
+	if current == ri.tag {
+		m.log.Debug("yt-dlp is up to date", "version", ri.tag)
 		return
 	}
 
-	m.log.Info("updating yt-dlp", "current", current, "latest", tag)
+	m.log.Info("updating yt-dlp", "current", current, "latest", ri.tag)
+
+	// Download and verify outside the lock so concurrent Download calls are not blocked.
+	tmpPath, err := downloadToTemp(ctx, m.httpClient, ri.downloadURL, filepath.Dir(m.binPath))
+	if err != nil {
+		m.log.Warn("yt-dlp update: download failed", "err", err)
+		return
+	}
+
+	defer func() { _ = os.Remove(tmpPath) }()
+
+	if err := verifyChecksum(ctx, m.httpClient, ri, tmpPath); err != nil {
+		m.log.Warn("yt-dlp update: checksum failed, skipping update", "err", err)
+		return
+	}
 
 	backup := m.binPath + ".bak"
 
@@ -280,32 +305,31 @@ func (m *Manager) checkForUpdate(ctx context.Context) {
 		return
 	}
 
-	if err := downloadBinary(ctx, m.httpClient, dlURL, m.binPath); err != nil {
-		m.log.Warn("yt-dlp update: download failed, rolling back", "err", err)
-		m.recoverBinary(ctx, backup, dlURL)
+	if err := installBinary(tmpPath, m.binPath); err != nil {
+		m.log.Warn("yt-dlp update: install failed, rolling back", "err", err)
+		m.recoverBinary(ctx, backup, ri, false)
 
 		return
 	}
 
 	if err := m.smokeTest(ctx); err != nil {
 		m.log.Warn("yt-dlp update: smoke test failed, rolling back", "err", err)
-		// Pass "" so recoverBinary does not re-download the binary that just
-		// failed the smoke test.
-		m.recoverBinary(ctx, backup, "")
+		// skipRedownload=true: the binary at ri.downloadURL already proved broken.
+		m.recoverBinary(ctx, backup, ri, true)
 
 		return
 	}
 
 	_ = os.Remove(backup)
-	m.log.Info("yt-dlp updated", "version", tag)
+	m.log.Info("yt-dlp updated", "version", ri.tag)
 }
 
-// recoverBinary attempts to restore the binary after a failed update.
-// It first tries to rename backup back to binPath. If that fails and dlURL is
-// non-empty, it re-downloads as a last resort. Pass dlURL="" when the binary at
-// that URL is already known to be bad (e.g. it failed a smoke test) — re-downloading
-// it would only install the same broken binary again.
-func (m *Manager) recoverBinary(ctx context.Context, backup, dlURL string) {
+// recoverBinary attempts to restore the binary after a failed update by renaming
+// backup back to binPath. If that fails and skipRedownload is false, it re-downloads
+// and re-verifies ri as a last resort. Pass skipRedownload=true when the binary at
+// ri.downloadURL is already known bad (e.g. failed smoke test) to avoid reinstalling
+// the same broken binary.
+func (m *Manager) recoverBinary(ctx context.Context, backup string, ri releaseInfo, skipRedownload bool) {
 	err := os.Rename(backup, m.binPath)
 	if err == nil {
 		m.log.Info("yt-dlp rolled back to previous version")
@@ -314,23 +338,19 @@ func (m *Manager) recoverBinary(ctx context.Context, backup, dlURL string) {
 
 	m.log.Error("yt-dlp rollback via rename failed", "err", err)
 
-	if dlURL == "" {
-		m.log.Error("yt-dlp recovery: binary is known bad; will not re-download; restart the application to retry")
+	if skipRedownload {
+		m.log.Error("yt-dlp recovery: binary is known bad; will not re-download; restart to retry")
 		return
 	}
 
-	if err := downloadBinary(ctx, m.httpClient, dlURL, m.binPath); err != nil {
-		m.log.Error(
-			"yt-dlp recovery failed: binary is unavailable; restart the application to retry",
-			"err", err,
-		)
-
+	if err := downloadAndInstall(ctx, m.httpClient, ri, m.binPath); err != nil {
+		m.log.Error("yt-dlp recovery failed: binary is unavailable; restart to retry", "err", err)
 		return
 	}
 
 	if err := m.smokeTest(ctx); err != nil {
 		m.log.Error(
-			"yt-dlp recovery: re-downloaded binary failed smoke test; binary is unavailable; restart to retry",
+			"yt-dlp recovery: re-downloaded binary failed smoke test; restart to retry",
 			"err", err,
 		)
 
