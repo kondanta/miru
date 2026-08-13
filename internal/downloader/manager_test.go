@@ -29,7 +29,8 @@ func fakeYtDlp(t *testing.T, dataDir, version string) {
 }
 
 // releaseServer returns a test server that serves a mock GitHub releases API
-// response and a /binary endpoint. Skips if the current platform is unsupported.
+// response, a /binary endpoint, and a /checksums endpoint with the correct
+// SHA2-256SUMS for binScript. Skips if the current platform is unsupported.
 func releaseServer(t *testing.T, tag, binScript string) *httptest.Server {
 	t.Helper()
 
@@ -38,16 +39,25 @@ func releaseServer(t *testing.T, tag, binScript string) *httptest.Server {
 		t.Skipf("platform not supported: %v", err)
 	}
 
+	h := sha256.Sum256([]byte(binScript))
+	checksumLine := hex.EncodeToString(h[:]) + "  " + want + "\n"
+
 	var srv *httptest.Server
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/binary") {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/binary"):
 			_, _ = w.Write([]byte(binScript))
-			return
+		case strings.HasSuffix(r.URL.Path, "/checksums"):
+			_, _ = w.Write([]byte(checksumLine))
+		default:
+			_ = json.NewEncoder(w).Encode(ghRelease{
+				TagName: tag,
+				Assets: []ghAsset{
+					{Name: want, BrowserDownloadURL: srv.URL + "/binary"},
+					{Name: "SHA2-256SUMS", BrowserDownloadURL: srv.URL + "/checksums"},
+				},
+			})
 		}
-		_ = json.NewEncoder(w).Encode(ghRelease{
-			TagName: tag,
-			Assets:  []ghAsset{{Name: want, BrowserDownloadURL: srv.URL + "/binary"}},
-		})
 	}))
 	t.Cleanup(srv.Close)
 
@@ -170,16 +180,28 @@ func TestFetchRelease_MissingAsset(t *testing.T) {
 
 func TestDownloadAndInstall(t *testing.T) {
 	const content = "#!/bin/sh\necho fake-yt-dlp\n"
+	const name = "yt-dlp"
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	h := sha256.Sum256([]byte(content))
+	checksum := hex.EncodeToString(h[:])
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/checksums") {
+			_, _ = fmt.Fprintf(w, "%s  %s\n", checksum, name)
+			return
+		}
 		_, _ = w.Write([]byte(content))
 	}))
 	t.Cleanup(srv.Close)
 
 	dest := filepath.Join(t.TempDir(), "yt-dlp")
-	ri := releaseInfo{downloadURL: srv.URL} // checksumURL empty → verification skipped
+	ri := releaseInfo{
+		assetName:   name,
+		downloadURL: srv.URL + "/binary",
+		checksumURL: srv.URL + "/checksums",
+	}
 
-	if err := downloadAndInstall(context.Background(), &http.Client{}, ri, dest); err != nil {
+	if err := downloadAndInstall(t.Context(), &http.Client{}, ri, dest); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -229,10 +251,10 @@ func TestVerifyChecksum(t *testing.T) {
 		t.Fatal("expected error for mismatched checksum, got nil")
 	}
 
-	// Empty checksumURL → skipped, no error.
+	// Empty checksumURL → rejected; installation without verification is refused.
 	ri.checksumURL = ""
-	if err := verifyChecksum(t.Context(), &http.Client{}, ri, tmpPath); err != nil {
-		t.Fatalf("expected nil for empty checksumURL, got: %v", err)
+	if err := verifyChecksum(t.Context(), &http.Client{}, ri, tmpPath); err == nil {
+		t.Fatal("expected error for empty checksumURL, got nil")
 	}
 }
 
