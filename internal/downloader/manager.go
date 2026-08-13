@@ -158,6 +158,8 @@ func (m *Manager) SetVersion(ctx context.Context, tag string) error {
 	if err := m.smokeTest(ctx); err != nil {
 		if hasBackup {
 			m.recoverBinary(backup)
+		} else if removeErr := os.Remove(m.binPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			m.log.Warn("yt-dlp: could not remove broken binary after smoke-test failure", "err", removeErr)
 		}
 		return fmt.Errorf("smoke test yt-dlp %q: %w", tag, err)
 	}

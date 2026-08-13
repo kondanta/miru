@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -290,6 +291,25 @@ func TestEnsureReady_CachedBinary(t *testing.T) {
 
 	if err := m.EnsureReady(t.Context()); err != nil {
 		t.Fatalf("EnsureReady with cached binary: %v", err)
+	}
+}
+
+func TestSetVersion_SmokeTestFail_NoBinary(t *testing.T) {
+	const tag = "2024.01.15"
+
+	dir := t.TempDir()
+	// Script that always exits 1 — passes download/checksum but fails --version.
+	srv := releaseServer(t, tag, "#!/bin/sh\nexit 1\n")
+
+	m := newTestManager(t, dir, srv)
+
+	if err := m.SetVersion(t.Context(), tag); err == nil {
+		t.Fatal("expected error from SetVersion with bad binary, got nil")
+	}
+
+	// Broken binary must not be left on disk — EnsureReady would get stuck on it.
+	if _, err := os.Stat(m.binPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("broken binary left at binPath after smoke-test failure: %v", err)
 	}
 }
 
