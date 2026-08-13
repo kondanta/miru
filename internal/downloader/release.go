@@ -154,10 +154,11 @@ func downloadToTemp(ctx context.Context, client *http.Client, url, dir string) (
 
 // verifyChecksum downloads SHA2-256SUMS from ri.checksumURL, finds the expected
 // hash for ri.assetName, and verifies it against the file at tmpPath.
-// Returns nil immediately when ri.checksumURL is empty.
+// Returns an error when ri.checksumURL is empty — releases without a published
+// checksum are rejected rather than silently installed unverified.
 func verifyChecksum(ctx context.Context, client *http.Client, ri releaseInfo, tmpPath string) error {
 	if ri.checksumURL == "" {
-		return nil
+		return fmt.Errorf("release has no SHA2-256SUMS asset; refusing to install unverified binary")
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ri.checksumURL, nil)
