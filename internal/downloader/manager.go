@@ -150,15 +150,14 @@ func (m *Manager) SetVersion(ctx context.Context, tag string) error {
 
 	if err := installBinary(tmpPath, m.binPath); err != nil {
 		if hasBackup {
-			m.recoverBinary(ctx, backup, ri, false)
+			m.recoverBinary(backup)
 		}
 		return fmt.Errorf("install yt-dlp %q: %w", tag, err)
 	}
 
 	if err := m.smokeTest(ctx); err != nil {
 		if hasBackup {
-			// skipRedownload=true: the binary at ri.downloadURL already proved broken.
-			m.recoverBinary(ctx, backup, ri, true)
+			m.recoverBinary(backup)
 		}
 		return fmt.Errorf("smoke test yt-dlp %q: %w", tag, err)
 	}
@@ -307,15 +306,14 @@ func (m *Manager) checkForUpdate(ctx context.Context) {
 
 	if err := installBinary(tmpPath, m.binPath); err != nil {
 		m.log.Warn("yt-dlp update: install failed, rolling back", "err", err)
-		m.recoverBinary(ctx, backup, ri, false)
+		m.recoverBinary(backup)
 
 		return
 	}
 
 	if err := m.smokeTest(ctx); err != nil {
 		m.log.Warn("yt-dlp update: smoke test failed, rolling back", "err", err)
-		// skipRedownload=true: the binary at ri.downloadURL already proved broken.
-		m.recoverBinary(ctx, backup, ri, true)
+		m.recoverBinary(backup)
 
 		return
 	}
@@ -324,39 +322,16 @@ func (m *Manager) checkForUpdate(ctx context.Context) {
 	m.log.Info("yt-dlp updated", "version", ri.tag)
 }
 
-// recoverBinary attempts to restore the binary after a failed update by renaming
-// backup back to binPath. If that fails and skipRedownload is false, it re-downloads
-// and re-verifies ri as a last resort. Pass skipRedownload=true when the binary at
-// ri.downloadURL is already known bad (e.g. failed smoke test) to avoid reinstalling
-// the same broken binary.
-func (m *Manager) recoverBinary(ctx context.Context, backup string, ri releaseInfo, skipRedownload bool) {
-	err := os.Rename(backup, m.binPath)
-	if err == nil {
-		m.log.Info("yt-dlp rolled back to previous version")
+// recoverBinary restores the backup binary to binPath via rename.
+// Called after a failed update while holding m.mu.Lock(). If the rename fails
+// the binary is unavailable; the operator must restart the application to retry.
+// A re-download is not attempted: if rename fails the filesystem is in a bad
+// state and a download to the same path will fail for the same reason.
+func (m *Manager) recoverBinary(backup string) {
+	if err := os.Rename(backup, m.binPath); err != nil {
+		m.log.Error("yt-dlp rollback failed; binary is unavailable; restart to retry", "err", err)
 		return
 	}
 
-	m.log.Error("yt-dlp rollback via rename failed", "err", err)
-
-	if skipRedownload {
-		m.log.Error("yt-dlp recovery: binary is known bad; will not re-download; restart to retry")
-		return
-	}
-
-	if err := downloadAndInstall(ctx, m.httpClient, ri, m.binPath); err != nil {
-		m.log.Error("yt-dlp recovery failed: binary is unavailable; restart to retry", "err", err)
-		return
-	}
-
-	if err := m.smokeTest(ctx); err != nil {
-		m.log.Error(
-			"yt-dlp recovery: re-downloaded binary failed smoke test; restart to retry",
-			"err", err,
-		)
-
-		return
-	}
-
-	_ = os.Remove(backup)
-	m.log.Info("yt-dlp recovered via re-download")
+	m.log.Info("yt-dlp rolled back to previous version")
 }
