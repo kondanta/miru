@@ -28,6 +28,10 @@ run = "go vet ./..."
 description = "Run golangci-lint"
 run = "golangci-lint run"
 
+[tasks.fmt]
+description = "Run golangci-lint fmt"
+run = "golangci-lint fmt  ./..."
+
 [tasks.ci]
 description = "Full local CI suite"
 run = """

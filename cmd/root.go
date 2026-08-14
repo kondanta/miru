@@ -16,24 +16,21 @@ var version = "dev"
 
 // Execute builds and runs the miru command tree.
 func Execute() {
+	var configPath string
+
 	rootCmd := &cobra.Command{
 		Use:           "miru",
 		Short:         "Self-hosted YouTube downloader with Jellyfin integration",
+		Version:       version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
 
-	rootCmd.Flags().Bool("version", false, "print version and exit")
-	rootCmd.RunE = func(cmd *cobra.Command, _ []string) error {
-		v, _ := cmd.Flags().GetBool("version")
-		if v {
-			fmt.Printf("miru %s\n", version)
-			return nil
-		}
-		return cmd.Help()
-	}
+	rootCmd.PersistentFlags().StringVar(
+		&configPath, "config", "", "path to config file",
+	)
 
-	rootCmd.AddCommand(serveCmd())
+	rootCmd.AddCommand(serveCmd(&configPath))
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
