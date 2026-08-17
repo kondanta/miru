@@ -164,17 +164,19 @@ func (s *Server) logger(next http.Handler) http.Handler {
 
 // authenticate verifies the JWT and injects the user into the request context.
 // TODO: parse Bearer token, verify JWT, set user ID + is_admin in ctx (internal/auth not yet implemented).
+// Fails closed (401) until JWT verification is wired.
 func (s *Server) authenticate(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		next.ServeHTTP(w, r)
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusUnauthorized, errBody("unauthorized"))
 	})
 }
 
 // adminOnly rejects non-admin requests.
 // TODO: read is_admin from JWT claims set by authenticate; return 403 if false.
+// Fails closed (403) until admin claim verification is wired.
 func (s *Server) adminOnly(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		next.ServeHTTP(w, r)
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusForbidden, errBody("forbidden"))
 	})
 }
 

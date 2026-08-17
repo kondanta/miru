@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -60,6 +61,7 @@ func serve(ctx context.Context, cfg *config.Config) error {
 	if err := dl.EnsureReady(ctx); err != nil {
 		return fmt.Errorf("downloader: %w", err)
 	}
+	defer dl.Close()
 
 	queueMgr := queue.New(ctx, stubWorker(log), log)
 
@@ -74,8 +76,13 @@ func serve(ctx context.Context, cfg *config.Config) error {
 		IdleTimeout:       120 * time.Second,
 	}
 
+	ln, err := net.Listen("tcp", httpSrv.Addr)
+	if err != nil {
+		return fmt.Errorf("listen: %w", err)
+	}
+
 	go func() {
-		if err := httpSrv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+		if err := httpSrv.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
 			log.Error("http server error", "err", err)
 		}
 	}()
