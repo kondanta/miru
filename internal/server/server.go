@@ -301,6 +301,8 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 
 	if !passwordHash.Valid || passwordHash.String == "" {
 		// OIDC-only user has no password set — local login is not allowed.
+		// Run dummyHash to normalize response time and prevent OIDC-account enumeration.
+		_ = auth.CheckPassword(dummyHash, req.Password)
 		writeJSON(w, http.StatusUnauthorized, errBody("invalid credentials"))
 		return
 	}

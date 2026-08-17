@@ -130,29 +130,26 @@ func bootstrapAdmin(ctx context.Context, database *sql.DB, log *slog.Logger) err
 		return nil
 	}
 
-	var count int
-	if err := database.QueryRowContext(ctx, `SELECT COUNT(*) FROM users`).Scan(&count); err != nil {
-		return fmt.Errorf("bootstrap: count users: %w", err)
-	}
-	if count > 0 {
-		return nil
-	}
-
 	hash, err := auth.HashPassword(password)
 	if err != nil {
 		return fmt.Errorf("bootstrap: %w", err)
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err = database.ExecContext(ctx,
-		`INSERT INTO users (id, username, password, is_admin, created_at) VALUES (?, ?, ?, 1, ?)`,
+	// Single atomic statement: inserts only when no users exist.
+	// Safe under concurrent startup — the second process is a no-op.
+	result, err := database.ExecContext(ctx,
+		`INSERT INTO users (id, username, password, is_admin, created_at)
+		 SELECT ?, ?, ?, 1, ? WHERE NOT EXISTS (SELECT 1 FROM users)`,
 		uuid.NewString(), username, hash, now,
 	)
 	if err != nil {
-		return fmt.Errorf("bootstrap: insert admin: %w", err)
+		return fmt.Errorf("bootstrap: %w", err)
 	}
 
-	log.Info("admin user created", "username", username)
+	if n, _ := result.RowsAffected(); n > 0 {
+		log.Info("admin user created", "username", username)
+	}
 	return nil
 }
 
