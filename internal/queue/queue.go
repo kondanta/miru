@@ -34,13 +34,17 @@ type WorkerFunc func(ctx context.Context, job Job) error
 // Manager owns one goroutine per user and routes incoming jobs to the
 // appropriate queue. The manager's lifetime is tied to the context passed
 // to New; cancelling it stops all workers after their current job completes.
+//
+// TODO: retire idle per-user workers to bound goroutine/channel growth for
+// long-running deployments with many users.
 type Manager struct {
-	ctx    context.Context
-	mu     sync.Mutex
-	queues map[string]*userQueue
-	wg     sync.WaitGroup
-	worker WorkerFunc
-	log    *slog.Logger
+	ctx     context.Context
+	mu      sync.Mutex
+	closing bool
+	queues  map[string]*userQueue
+	wg      sync.WaitGroup
+	worker  WorkerFunc
+	log     *slog.Logger
 }
 
 type userQueue struct {
@@ -58,9 +62,15 @@ func New(ctx context.Context, worker WorkerFunc, log *slog.Logger) *Manager {
 }
 
 // Enqueue adds job to the user's queue, starting a worker goroutine if one is
-// not already running for that user.
+// not already running for that user. It is a no-op if Wait has been called or
+// the context is already cancelled.
 func (m *Manager) Enqueue(job Job) {
 	m.mu.Lock()
+	if m.closing || m.ctx.Err() != nil {
+		m.mu.Unlock()
+		m.log.Warn("enqueue dropped: manager closed", "user_id", job.UserID, "job_id", job.ID)
+		return
+	}
 	uq, ok := m.queues[job.UserID]
 	if !ok {
 		uq = m.startWorker(job.UserID)
@@ -88,6 +98,10 @@ func (m *Manager) run(userID string, ch <-chan Job) {
 			if !ok {
 				return
 			}
+			if m.ctx.Err() != nil {
+				m.log.Warn("job skipped: context cancelled", "user_id", userID, "job_id", job.ID)
+				continue
+			}
 			if err := m.worker(m.ctx, job); err != nil {
 				m.log.Error("job failed", "user_id", userID, "job_id", job.ID, "err", err)
 			}
@@ -97,8 +111,11 @@ func (m *Manager) run(userID string, ch <-chan Job) {
 	}
 }
 
-// Wait blocks until all worker goroutines have exited. Call after the context
-// passed to New has been cancelled.
+// Wait closes the manager to new jobs and blocks until all worker goroutines
+// have exited. Call after the context passed to New has been cancelled.
 func (m *Manager) Wait() {
+	m.mu.Lock()
+	m.closing = true
+	m.mu.Unlock()
 	m.wg.Wait()
 }

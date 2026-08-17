@@ -218,6 +218,25 @@ url = "http://jellyfin.local:8096"
 	}
 }
 
+func TestLoad_JellyfinNoHost(t *testing.T) {
+	// url.Parse("https:example.com") succeeds but has no host.
+	path := writeConfig(t, `
+data_dir = "/data"
+downloads_dir = "/downloads"
+[jellyfin]
+url = "https:example.com"
+api_key = "key"
+`)
+
+	_, err := Load(context.Background(), path)
+	if err == nil {
+		t.Fatal("expected error for host-less Jellyfin URL, got nil")
+	}
+	if !strings.Contains(err.Error(), "jellyfin.url") {
+		t.Errorf("error %q does not mention jellyfin.url", err)
+	}
+}
+
 func TestLoad_JellyfinInvalidURL(t *testing.T) {
 	path := writeConfig(t, `
 data_dir = "/data"

@@ -252,7 +252,7 @@ func validateJellyfin(j *Jellyfin) []string {
 		errs = append(errs, "jellyfin: url is required")
 	} else {
 		u, err := url.Parse(j.URL)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
 			errs = append(errs, fmt.Sprintf("jellyfin.url %q must be a valid http or https URL", j.URL))
 		}
 	}
