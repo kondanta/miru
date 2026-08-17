@@ -15,13 +15,28 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/kondanta/miru/internal/auth"
 	"github.com/kondanta/miru/internal/config"
 	"github.com/kondanta/miru/internal/queue"
 )
 
 type contextKey int
 
-const keyRequestID contextKey = 0
+const (
+	keyRequestID contextKey = iota
+	keyClaims
+)
+
+const jwtTTL = 24 * time.Hour
+
+// dummyHash is computed once at startup and used to normalize login response
+// timing when the requested username does not exist, preventing user
+// enumeration via response-time differences.
+var dummyHash = func() string {
+	h, _ := auth.HashPassword("miru-dummy-password-for-timing-normalization")
+	return h
+}()
 
 // Server holds shared dependencies for all HTTP handlers.
 type Server struct {
@@ -162,21 +177,55 @@ func (s *Server) logger(next http.Handler) http.Handler {
 	})
 }
 
-// authenticate verifies the JWT and injects the user into the request context.
-// TODO: parse Bearer token, verify JWT, set user ID + is_admin in ctx (internal/auth not yet implemented).
-// Fails closed (401) until JWT verification is wired.
+// authenticate verifies the Bearer JWT, checks token_version against the DB,
+// and injects the claims into the request context.
 func (s *Server) authenticate(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusUnauthorized, errBody("unauthorized"))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		header := r.Header.Get("Authorization")
+		if !strings.HasPrefix(header, "Bearer ") {
+			writeJSON(w, http.StatusUnauthorized, errBody("missing or malformed Authorization header"))
+			return
+		}
+
+		claims, err := auth.ParseToken(strings.TrimPrefix(header, "Bearer "), []byte(s.cfg.JWTSecret))
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, errBody("invalid token"))
+			return
+		}
+
+		// Verify token_version to support per-user session invalidation.
+		var dbVersion int
+		err = s.db.QueryRowContext(r.Context(),
+			`SELECT token_version FROM users WHERE id = ?`, claims.Subject).
+			Scan(&dbVersion)
+		if errors.Is(err, sql.ErrNoRows) {
+			writeJSON(w, http.StatusUnauthorized, errBody("user not found"))
+			return
+		}
+		if err != nil {
+			s.log.Error("token_version lookup", "err", err)
+			writeJSON(w, http.StatusInternalServerError, errBody("internal server error"))
+			return
+		}
+		if claims.TokenVersion != dbVersion {
+			writeJSON(w, http.StatusUnauthorized, errBody("token has been invalidated"))
+			return
+		}
+
+		ctx := context.WithValue(r.Context(), keyClaims, claims)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
-// adminOnly rejects non-admin requests.
-// TODO: read is_admin from JWT claims set by authenticate; return 403 if false.
-// Fails closed (403) until admin claim verification is wired.
+// adminOnly rejects requests where the JWT claims do not carry is_admin=true.
 func (s *Server) adminOnly(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusForbidden, errBody("forbidden"))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		claims, ok := r.Context().Value(keyClaims).(*auth.Claims)
+		if !ok || !claims.IsAdmin {
+			writeJSON(w, http.StatusForbidden, errBody("forbidden"))
+			return
+		}
+		next.ServeHTTP(w, r)
 	})
 }
 
@@ -206,7 +255,78 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 }
 
 // Auth
-func (s *Server) handleAuthLogin(w http.ResponseWriter, _ *http.Request)    { notImplemented(w) }
+
+type loginRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+type loginResponse struct {
+	Token string `json:"token"`
+}
+
+func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
+	var req loginRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody("invalid request body"))
+		return
+	}
+	if req.Username == "" || req.Password == "" {
+		writeJSON(w, http.StatusBadRequest, errBody("username and password are required"))
+		return
+	}
+
+	var (
+		userID       string
+		passwordHash sql.NullString
+		isAdmin      bool
+		tokenVersion int
+	)
+	err := s.db.QueryRowContext(r.Context(),
+		`SELECT id, password, is_admin, token_version FROM users WHERE username = ?`,
+		req.Username,
+	).Scan(&userID, &passwordHash, &isAdmin, &tokenVersion)
+	if errors.Is(err, sql.ErrNoRows) {
+		// Normalize timing to prevent username enumeration.
+		_ = auth.CheckPassword(dummyHash, req.Password)
+		writeJSON(w, http.StatusUnauthorized, errBody("invalid credentials"))
+		return
+	}
+	if err != nil {
+		s.log.Error("login query", "err", err)
+		writeJSON(w, http.StatusInternalServerError, errBody("internal server error"))
+		return
+	}
+
+	if !passwordHash.Valid || passwordHash.String == "" {
+		// OIDC-only user has no password set — local login is not allowed.
+		// Run dummyHash to normalize response time and prevent OIDC-account enumeration.
+		_ = auth.CheckPassword(dummyHash, req.Password)
+		writeJSON(w, http.StatusUnauthorized, errBody("invalid credentials"))
+		return
+	}
+
+	if err := auth.CheckPassword(passwordHash.String, req.Password); err != nil {
+		writeJSON(w, http.StatusUnauthorized, errBody("invalid credentials"))
+		return
+	}
+
+	token, err := auth.SignToken(auth.Claims{
+		Username:         req.Username,
+		IsAdmin:          isAdmin,
+		TokenVersion:     tokenVersion,
+		RegisteredClaims: jwt.RegisteredClaims{Subject: userID},
+	}, []byte(s.cfg.JWTSecret), jwtTTL)
+	if err != nil {
+		s.log.Error("sign token", "err", err)
+		writeJSON(w, http.StatusInternalServerError, errBody("internal server error"))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, loginResponse{Token: token})
+}
+
 func (s *Server) handleOIDCLogin(w http.ResponseWriter, _ *http.Request)    { notImplemented(w) }
 func (s *Server) handleOIDCCallback(w http.ResponseWriter, _ *http.Request) { notImplemented(w) }
 

@@ -28,6 +28,7 @@ type Config struct {
 	DownloadsDir string    `toml:"downloads_dir"`
 	Port         int       `toml:"port"`
 	LogLevel     string    `toml:"log_level"`
+	JWTSecret    string    `toml:"jwt_secret"`
 	OIDC         *OIDC     `toml:"oidc"`
 	Google       *Google   `toml:"google"`
 	Jellyfin     *Jellyfin `toml:"jellyfin"`
@@ -116,6 +117,9 @@ func applyEnv(cfg *Config) error {
 	}
 	if v := os.Getenv("MIRU_LOG_LEVEL"); v != "" {
 		cfg.LogLevel = v
+	}
+	if v := os.Getenv("MIRU_JWT_SECRET"); v != "" {
+		cfg.JWTSecret = v
 	}
 
 	applyOIDCEnv(cfg)
@@ -207,6 +211,11 @@ func (cfg *Config) validate() error {
 	}
 	if cfg.Port < 1 || cfg.Port > 65535 {
 		errs = append(errs, fmt.Sprintf("port %d out of range [1, 65535]", cfg.Port))
+	}
+	if cfg.JWTSecret == "" {
+		errs = append(errs, "jwt_secret is required (set via config or MIRU_JWT_SECRET)")
+	} else if len(cfg.JWTSecret) < 32 {
+		errs = append(errs, "jwt_secret must be at least 32 characters")
 	}
 	if !validLogLevels[cfg.LogLevel] {
 		errs = append(errs, fmt.Sprintf("log_level %q must be one of: debug, info, warn, error", cfg.LogLevel))

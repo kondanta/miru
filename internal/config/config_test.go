@@ -8,6 +8,9 @@ import (
 	"testing"
 )
 
+// testSecret is a 32-character string used as a valid JWT secret in tests.
+const testSecret = "test-secret-that-is-long-enough!!"
+
 func writeConfig(t *testing.T, content string) string {
 	t.Helper()
 
@@ -62,7 +65,7 @@ func TestLoad_MissingRequiredFields(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected validation error, got nil")
 	}
-	for _, field := range []string{"data_dir", "downloads_dir"} {
+	for _, field := range []string{"data_dir", "downloads_dir", "jwt_secret"} {
 		if !strings.Contains(err.Error(), field) {
 			t.Errorf("error %q does not mention %q", err, field)
 		}
@@ -72,6 +75,7 @@ func TestLoad_MissingRequiredFields(t *testing.T) {
 func TestLoad_EnvOnly(t *testing.T) {
 	t.Setenv("MIRU_DATA_DIR", t.TempDir())
 	t.Setenv("MIRU_DOWNLOADS_DIR", t.TempDir())
+	t.Setenv("MIRU_JWT_SECRET", testSecret)
 
 	cfg, err := Load(context.Background(), filepath.Join(t.TempDir(), "nonexistent.toml"))
 	if err != nil {
@@ -91,6 +95,7 @@ data_dir = "/data"
 downloads_dir = "/downloads"
 port = 9090
 log_level = "debug"
+jwt_secret = "`+testSecret+`"
 `)
 
 	cfg, err := Load(context.Background(), path)
@@ -113,6 +118,7 @@ func TestLoad_EnvOverridesFile(t *testing.T) {
 data_dir = "/data"
 downloads_dir = "/downloads"
 port = 9000
+jwt_secret = "`+testSecret+`"
 `)
 	t.Setenv("MIRU_PORT", "7777")
 
@@ -150,6 +156,33 @@ func TestLoad_PortZero(t *testing.T) {
 	}
 }
 
+func TestLoad_JWTSecretMissing(t *testing.T) {
+	t.Setenv("MIRU_DATA_DIR", "/data")
+	t.Setenv("MIRU_DOWNLOADS_DIR", "/downloads")
+
+	_, err := Load(context.Background(), filepath.Join(t.TempDir(), "nonexistent.toml"))
+	if err == nil {
+		t.Fatal("expected error for missing jwt_secret, got nil")
+	}
+	if !strings.Contains(err.Error(), "jwt_secret") {
+		t.Errorf("error %q does not mention jwt_secret", err)
+	}
+}
+
+func TestLoad_JWTSecretTooShort(t *testing.T) {
+	t.Setenv("MIRU_DATA_DIR", "/data")
+	t.Setenv("MIRU_DOWNLOADS_DIR", "/downloads")
+	t.Setenv("MIRU_JWT_SECRET", "tooshort")
+
+	_, err := Load(context.Background(), filepath.Join(t.TempDir(), "nonexistent.toml"))
+	if err == nil {
+		t.Fatal("expected error for short jwt_secret, got nil")
+	}
+	if !strings.Contains(err.Error(), "jwt_secret") {
+		t.Errorf("error %q does not mention jwt_secret", err)
+	}
+}
+
 func TestLoad_OIDCPartial(t *testing.T) {
 	path := writeConfig(t, `
 data_dir = "/data"
@@ -171,6 +204,7 @@ func TestLoad_OIDCFull(t *testing.T) {
 	path := writeConfig(t, `
 data_dir = "/data"
 downloads_dir = "/downloads"
+jwt_secret = "`+testSecret+`"
 [oidc]
 issuer = "https://auth.example.com"
 client_id = "miru"
@@ -259,6 +293,7 @@ func TestLoad_JellyfinValid(t *testing.T) {
 	path := writeConfig(t, `
 data_dir = "/data"
 downloads_dir = "/downloads"
+jwt_secret = "`+testSecret+`"
 [jellyfin]
 url = "http://jellyfin.local:8096"
 api_key = "key"

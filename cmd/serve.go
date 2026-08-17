@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/kondanta/miru/internal/auth"
 	"github.com/kondanta/miru/internal/config"
 	"github.com/kondanta/miru/internal/db"
 	"github.com/kondanta/miru/internal/downloader"
@@ -62,6 +64,10 @@ func serve(ctx context.Context, cfg *config.Config) error {
 		return fmt.Errorf("downloader: %w", err)
 	}
 	defer dl.Close()
+
+	if err := bootstrapAdmin(ctx, database, log); err != nil {
+		return err
+	}
 
 	queueMgr := queue.New(ctx, stubWorker(log), log)
 
@@ -112,6 +118,39 @@ func openDB(ctx context.Context, dataDir string) (*sql.DB, error) {
 		return nil, fmt.Errorf("migrate database: %w", err)
 	}
 	return database, nil
+}
+
+// bootstrapAdmin creates the first admin user from MIRU_ADMIN_USERNAME and
+// MIRU_ADMIN_PASSWORD env vars when no users exist in the database. It is a
+// no-op when either env var is absent or the users table is non-empty.
+func bootstrapAdmin(ctx context.Context, database *sql.DB, log *slog.Logger) error {
+	username := os.Getenv("MIRU_ADMIN_USERNAME")
+	password := os.Getenv("MIRU_ADMIN_PASSWORD")
+	if username == "" || password == "" {
+		return nil
+	}
+
+	hash, err := auth.HashPassword(password)
+	if err != nil {
+		return fmt.Errorf("bootstrap: %w", err)
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	// Single atomic statement: inserts only when no users exist.
+	// Safe under concurrent startup — the second process is a no-op.
+	result, err := database.ExecContext(ctx,
+		`INSERT INTO users (id, username, password, is_admin, created_at)
+		 SELECT ?, ?, ?, 1, ? WHERE NOT EXISTS (SELECT 1 FROM users)`,
+		uuid.NewString(), username, hash, now,
+	)
+	if err != nil {
+		return fmt.Errorf("bootstrap: %w", err)
+	}
+
+	if n, _ := result.RowsAffected(); n > 0 {
+		log.Info("admin user created", "username", username)
+	}
+	return nil
 }
 
 // stubWorker is a placeholder until the real download worker is implemented.
