@@ -289,6 +289,150 @@ api_key = "key"
 	}
 }
 
+func TestLoad_NFODefaults(t *testing.T) {
+	t.Setenv("MIRU_DATA_DIR", "/data")
+	t.Setenv("MIRU_DOWNLOADS_DIR", "/downloads")
+	t.Setenv("MIRU_JWT_SECRET", testSecret)
+
+	cfg, err := Load(context.Background(), filepath.Join(t.TempDir(), "nonexistent.toml"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if *cfg.NFO.MaxTags != 10 {
+		t.Errorf("MaxTags: got %d, want 10", *cfg.NFO.MaxTags)
+	}
+	if *cfg.NFO.MaxPosterBytes != 10*MB {
+		t.Errorf("MaxPosterBytes: got %d, want %d", *cfg.NFO.MaxPosterBytes, 10*MB)
+	}
+}
+
+func TestLoad_NFOMaxTagsEnv(t *testing.T) {
+	t.Setenv("MIRU_DATA_DIR", "/data")
+	t.Setenv("MIRU_DOWNLOADS_DIR", "/downloads")
+	t.Setenv("MIRU_JWT_SECRET", testSecret)
+	t.Setenv("MIRU_NFO_MAX_TAGS", "25")
+
+	cfg, err := Load(context.Background(), filepath.Join(t.TempDir(), "nonexistent.toml"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if *cfg.NFO.MaxTags != 25 {
+		t.Errorf("MaxTags: got %d, want 25", *cfg.NFO.MaxTags)
+	}
+}
+
+func TestLoad_NFOMaxTagsZero(t *testing.T) {
+	t.Setenv("MIRU_NFO_MAX_TAGS", "0")
+
+	_, err := Load(context.Background(), filepath.Join(t.TempDir(), "nonexistent.toml"))
+	if err == nil {
+		t.Fatal("expected error for MIRU_NFO_MAX_TAGS=0, got nil")
+	}
+	if !strings.Contains(err.Error(), "MIRU_NFO_MAX_TAGS") {
+		t.Errorf("error %q does not mention MIRU_NFO_MAX_TAGS", err)
+	}
+}
+
+func TestLoad_NFOMaxPosterBytesEnv(t *testing.T) {
+	t.Setenv("MIRU_DATA_DIR", "/data")
+	t.Setenv("MIRU_DOWNLOADS_DIR", "/downloads")
+	t.Setenv("MIRU_JWT_SECRET", testSecret)
+	t.Setenv("MIRU_NFO_MAX_POSTER_BYTES", "20MB")
+
+	cfg, err := Load(context.Background(), filepath.Join(t.TempDir(), "nonexistent.toml"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if *cfg.NFO.MaxPosterBytes != 20*MB {
+		t.Errorf("MaxPosterBytes: got %d, want %d", *cfg.NFO.MaxPosterBytes, 20*MB)
+	}
+}
+
+func TestLoad_NFOMaxPosterBytesFile(t *testing.T) {
+	path := writeConfig(t, `
+data_dir = "/data"
+downloads_dir = "/downloads"
+jwt_secret = "`+testSecret+`"
+[nfo]
+max_poster_bytes = "1GB"
+`)
+
+	cfg, err := Load(context.Background(), path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if *cfg.NFO.MaxPosterBytes != GB {
+		t.Errorf("MaxPosterBytes: got %d, want %d (1 GiB)", *cfg.NFO.MaxPosterBytes, GB)
+	}
+}
+
+func TestLoad_NFOMaxPosterBytesFileInteger(t *testing.T) {
+	// TOML integers (not strings) must also decode into ByteSize correctly.
+	path := writeConfig(t, `
+data_dir = "/data"
+downloads_dir = "/downloads"
+jwt_secret = "`+testSecret+`"
+[nfo]
+max_poster_bytes = 10485760
+`)
+
+	cfg, err := Load(context.Background(), path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if *cfg.NFO.MaxPosterBytes != 10*MB {
+		t.Errorf("MaxPosterBytes: got %d, want %d (10 MiB)", *cfg.NFO.MaxPosterBytes, 10*MB)
+	}
+}
+
+func TestLoad_NFOMaxTagsTomlZero(t *testing.T) {
+	path := writeConfig(t, `
+data_dir = "/data"
+downloads_dir = "/downloads"
+jwt_secret = "`+testSecret+`"
+[nfo]
+max_tags = 0
+`)
+
+	_, err := Load(context.Background(), path)
+	if err == nil {
+		t.Fatal("expected error for TOML max_tags=0, got nil")
+	}
+	if !strings.Contains(err.Error(), "nfo.max_tags") {
+		t.Errorf("error %q does not mention nfo.max_tags", err)
+	}
+}
+
+func TestLoad_NFOMaxPosterBytesTomlZero(t *testing.T) {
+	path := writeConfig(t, `
+data_dir = "/data"
+downloads_dir = "/downloads"
+jwt_secret = "`+testSecret+`"
+[nfo]
+max_poster_bytes = 0
+`)
+
+	_, err := Load(context.Background(), path)
+	if err == nil {
+		t.Fatal("expected error for TOML max_poster_bytes=0, got nil")
+	}
+	if !strings.Contains(err.Error(), "nfo.max_poster_bytes") {
+		t.Errorf("error %q does not mention nfo.max_poster_bytes", err)
+	}
+}
+
+func TestLoad_NFOInvalidPosterBytes(t *testing.T) {
+	t.Setenv("MIRU_NFO_MAX_POSTER_BYTES", "notabytes")
+
+	_, err := Load(context.Background(), filepath.Join(t.TempDir(), "nonexistent.toml"))
+	if err == nil {
+		t.Fatal("expected error for invalid MIRU_NFO_MAX_POSTER_BYTES")
+	}
+	if !strings.Contains(err.Error(), "MIRU_NFO_MAX_POSTER_BYTES") {
+		t.Errorf("error %q does not mention MIRU_NFO_MAX_POSTER_BYTES", err)
+	}
+}
+
 func TestLoad_JellyfinValid(t *testing.T) {
 	path := writeConfig(t, `
 data_dir = "/data"
