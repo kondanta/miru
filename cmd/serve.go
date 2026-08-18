@@ -182,7 +182,7 @@ func reconcileDownloads(ctx context.Context, database *sql.DB, q *queue.Manager,
 	}
 	defer func() { _ = rows.Close() }()
 
-	var count int
+	var accepted, rejected int
 	for rows.Next() {
 		var (
 			id, userID, youtubeID, quality string
@@ -191,22 +191,26 @@ func reconcileDownloads(ctx context.Context, database *sql.DB, q *queue.Manager,
 		if err := rows.Scan(&id, &userID, &youtubeID, &quality, &sponsorblock); err != nil {
 			return fmt.Errorf("scan queued download: %w", err)
 		}
-		q.Enqueue(queue.Job{
+		if q.Enqueue(queue.Job{
 			ID:           id,
 			UserID:       userID,
 			YoutubeID:    youtubeID,
 			URL:          "https://www.youtube.com/watch?v=" + youtubeID,
 			Quality:      quality,
 			SponsorBlock: sponsorblock == 1,
-		})
-		count++
+		}) {
+			accepted++
+		} else {
+			rejected++
+			markFailed(database, id, log)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("iterate queued downloads: %w", err)
 	}
 
-	if count > 0 {
-		log.Info("reconciled downloads on startup", "count", count)
+	if accepted > 0 || rejected > 0 {
+		log.Info("reconciled downloads on startup", "accepted", accepted, "rejected", rejected)
 	}
 	return nil
 }
@@ -370,14 +374,18 @@ type limitWriter struct {
 const stderrCap = 4 * 1024 // 4 KB is plenty for yt-dlp error messages
 
 func (lw *limitWriter) Write(p []byte) (int, error) {
+	originalLen := len(p)
 	remaining := stderrCap - lw.buf.Len()
 	if remaining <= 0 {
-		return len(p), nil
+		return originalLen, nil
 	}
 	if len(p) > remaining {
 		p = p[:remaining]
 	}
-	return lw.buf.Write(p)
+	if _, err := lw.buf.Write(p); err != nil {
+		return 0, err
+	}
+	return originalLen, nil
 }
 
 func (lw *limitWriter) String() string { return lw.buf.String() }
