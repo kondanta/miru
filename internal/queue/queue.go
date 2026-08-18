@@ -6,6 +6,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"time"
 )
 
 // Status mirrors the download status enum in the DB schema.
@@ -22,6 +23,7 @@ const (
 type Job struct {
 	ID           string
 	UserID       string
+	YoutubeID    string
 	URL          string
 	Quality      string
 	SponsorBlock bool
@@ -62,14 +64,14 @@ func New(ctx context.Context, worker WorkerFunc, log *slog.Logger) *Manager {
 }
 
 // Enqueue adds job to the user's queue, starting a worker goroutine if one is
-// not already running for that user. It is a no-op if Wait has been called or
-// the context is already cancelled.
-func (m *Manager) Enqueue(job Job) {
+// not already running for that user. It returns false (without queuing the job)
+// when the manager is closing or the context is cancelled.
+func (m *Manager) Enqueue(job Job) bool {
 	m.mu.Lock()
 	if m.closing || m.ctx.Err() != nil {
 		m.mu.Unlock()
 		m.log.Warn("enqueue dropped: manager closed", "user_id", job.UserID, "job_id", job.ID)
-		return
+		return false
 	}
 	uq, ok := m.queues[job.UserID]
 	if !ok {
@@ -78,10 +80,20 @@ func (m *Manager) Enqueue(job Job) {
 	}
 	m.mu.Unlock()
 
+	// Bound the wait so a full per-user buffer (64 slots) does not block the
+	// HTTP handler indefinitely. 10 s is generous for a queue that drains at
+	// download speed; callers should mark the row failed when false is returned.
+	timer := time.NewTimer(10 * time.Second)
+	defer timer.Stop()
 	select {
 	case uq.ch <- job:
+		return true
+	case <-timer.C:
+		m.log.Warn("enqueue timed out: queue full", "user_id", job.UserID, "job_id", job.ID)
+		return false
 	case <-m.ctx.Done():
 		m.log.Warn("enqueue dropped: context cancelled", "user_id", job.UserID, "job_id", job.ID)
+		return false
 	}
 }
 

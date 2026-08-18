@@ -25,15 +25,16 @@ const (
 )
 
 type Config struct {
-	DataDir      string    `toml:"data_dir"`
-	DownloadsDir string    `toml:"downloads_dir"`
-	Port         int       `toml:"port"`
-	LogLevel     string    `toml:"log_level"`
-	JWTSecret    string    `toml:"jwt_secret"`
-	NFO          NFOConfig `toml:"nfo"`
-	OIDC         *OIDC     `toml:"oidc"`
-	Google       *Google   `toml:"google"`
-	Jellyfin     *Jellyfin `toml:"jellyfin"`
+	DataDir              string    `toml:"data_dir"`
+	DownloadsDir         string    `toml:"downloads_dir"`
+	Port                 int       `toml:"port"`
+	LogLevel             string    `toml:"log_level"`
+	JWTSecret            string    `toml:"jwt_secret"`
+	DownloadTimeoutHours int       `toml:"download_timeout_hours"`
+	NFO                  NFOConfig `toml:"nfo"`
+	OIDC                 *OIDC     `toml:"oidc"`
+	Google               *Google   `toml:"google"`
+	Jellyfin             *Jellyfin `toml:"jellyfin"`
 }
 
 // NFOConfig controls NFO metadata generation behaviour.
@@ -199,6 +200,17 @@ func applyEnv(cfg *Config) error {
 	if v := os.Getenv("MIRU_JWT_SECRET"); v != "" {
 		cfg.JWTSecret = v
 	}
+	if v := os.Getenv("MIRU_DOWNLOAD_TIMEOUT_HOURS"); v != "" {
+		h, err := strconv.Atoi(v)
+		if err != nil || h < 1 || int64(h) > maxDownloadTimeoutHours {
+			return fmt.Errorf(
+				"MIRU_DOWNLOAD_TIMEOUT_HOURS %q: must be a positive integer <= %d",
+				v,
+				maxDownloadTimeoutHours,
+			)
+		}
+		cfg.DownloadTimeoutHours = h
+	}
 
 	if err := applyNFOEnv(cfg); err != nil {
 		return err
@@ -296,6 +308,9 @@ func applyDefaults(cfg *Config) {
 	if cfg.LogLevel == "" {
 		cfg.LogLevel = DefaultLogLevel
 	}
+	if cfg.DownloadTimeoutHours == 0 {
+		cfg.DownloadTimeoutHours = 6
+	}
 	if cfg.NFO.MaxTags == nil {
 		v := 10
 		cfg.NFO.MaxTags = &v
@@ -305,6 +320,10 @@ func applyDefaults(cfg *Config) {
 		cfg.NFO.MaxPosterBytes = &v
 	}
 }
+
+// maxDownloadTimeoutHours is math.MaxInt64 / int64(time.Hour) — the largest
+// value that can be safely converted to time.Duration without overflow.
+const maxDownloadTimeoutHours = math.MaxInt64 / int64(3_600_000_000_000)
 
 var validLogLevels = map[string]bool{
 	"debug": true, "info": true, "warn": true, "error": true,
@@ -331,6 +350,11 @@ func (cfg *Config) validate() error {
 		errs = append(errs, fmt.Sprintf("log_level %q must be one of: debug, info, warn, error", cfg.LogLevel))
 	}
 
+	if cfg.DownloadTimeoutHours < 1 || int64(cfg.DownloadTimeoutHours) > maxDownloadTimeoutHours {
+		errs = append(errs, fmt.Sprintf(
+			"download_timeout_hours %d out of range [1, %d]", cfg.DownloadTimeoutHours, maxDownloadTimeoutHours,
+		))
+	}
 	if *cfg.NFO.MaxTags < 1 {
 		errs = append(errs, "nfo.max_tags must be >= 1")
 	}
