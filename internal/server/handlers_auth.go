@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/kondanta/miru/internal/auth"
@@ -28,6 +29,12 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Username == "" || req.Password == "" {
 		writeJSON(w, http.StatusBadRequest, errBody("username and password are required"))
+		return
+	}
+
+	if allowed, retryAfter := s.loginLimiter.allow(req.Username); !allowed {
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+		writeJSON(w, http.StatusTooManyRequests, errBody("too many login attempts, try again later"))
 		return
 	}
 

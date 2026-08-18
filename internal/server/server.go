@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -41,19 +42,72 @@ var dummyHash = func() string {
 	return h
 }()
 
+// loginLimiter is a per-username fixed-window rate limiter for the login
+// endpoint. Keying by username means per-account throttling holds regardless of
+// how many source IPs an attacker rotates through.
+// Buckets for usernames that never retry are retained until process restart; at
+// the scale of a personal deployment this is not a concern.
+type loginLimiter struct {
+	mu          sync.Mutex
+	buckets     map[string]loginBucket
+	maxAttempts int
+	window      time.Duration
+}
+
+type loginBucket struct {
+	count   int
+	resetAt time.Time
+}
+
+func newLoginLimiter(maxAttempts int, window time.Duration) *loginLimiter {
+	return &loginLimiter{
+		buckets:     make(map[string]loginBucket),
+		maxAttempts: maxAttempts,
+		window:      window,
+	}
+}
+
+// allow returns whether the username may proceed. retryAfter is seconds until
+// the window resets and is meaningful only when allowed is false.
+func (l *loginLimiter) allow(username string) (allowed bool, retryAfter int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	now := time.Now()
+	b := l.buckets[username]
+	if now.After(b.resetAt) {
+		b = loginBucket{count: 0, resetAt: now.Add(l.window)}
+	}
+	b.count++
+	l.buckets[username] = b
+
+	if b.count > l.maxAttempts {
+		return false, int(b.resetAt.Sub(now).Seconds()) + 1
+	}
+	return true, 0
+}
+
 // Server holds shared dependencies for all HTTP handlers.
 type Server struct {
-	db    *sql.DB
-	cfg   *config.Config
-	queue *queue.Manager
-	log   *slog.Logger
-	web   fs.FS
+	db           *sql.DB
+	cfg          *config.Config
+	queue        *queue.Manager
+	log          *slog.Logger
+	web          fs.FS
+	loginLimiter *loginLimiter
 }
 
 // New creates a Server. web is the embedded SPA filesystem (may be nil to
 // disable the catch-all SPA route during tests).
 func New(db *sql.DB, cfg *config.Config, q *queue.Manager, log *slog.Logger, web fs.FS) *Server {
-	return &Server{db: db, cfg: cfg, queue: q, log: log, web: web}
+	return &Server{
+		db:           db,
+		cfg:          cfg,
+		queue:        q,
+		log:          log,
+		web:          web,
+		loginLimiter: newLoginLimiter(5, 15*time.Minute),
+	}
 }
 
 // Handler builds and returns the chi router. Call once at startup.
