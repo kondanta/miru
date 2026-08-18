@@ -34,7 +34,8 @@ var qualityFormats = map[string]string{
 type DownloadOpts struct {
 	Quality       string
 	SponsorBlock  bool
-	WriteInfoJSON bool // set true when the nfo package will consume the output
+	WriteInfoJSON bool      // set true when the nfo package will consume the output
+	Stderr        io.Writer // if nil, stderr is discarded; set to capture error output
 }
 
 // Manager owns the yt-dlp binary lifecycle and invocation.
@@ -213,10 +214,15 @@ func (m *Manager) Download(
 	// rename the binary between when we capture the path and when the kernel
 	// opens the file. Once Start returns the kernel holds the inode open and
 	// a subsequent rename is safe.
+	stderr := opts.Stderr
+	if stderr == nil {
+		stderr = io.Discard
+	}
+
 	m.mu.RLock()
 	cmd := exec.CommandContext(ctx, m.binPath, args...)
 	cmd.Stdout = progress
-	cmd.Stderr = progress
+	cmd.Stderr = stderr
 	err := cmd.Start()
 	m.mu.RUnlock()
 

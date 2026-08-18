@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -193,13 +194,19 @@ func runDownload(
 		return fmt.Errorf("create output dir: %w", err)
 	}
 
+	var stderrBuf bytes.Buffer
 	opts := downloader.DownloadOpts{
 		Quality:       job.Quality,
 		SponsorBlock:  job.SponsorBlock,
 		WriteInfoJSON: true,
+		Stderr:        &stderrBuf,
 	}
-	if err := dl.Download(ctx, job.URL, outDir, opts, io.Discard); err != nil {
-		return fmt.Errorf("yt-dlp: %w", err)
+	dlCtx, dlCancel := context.WithTimeout(ctx, 6*time.Hour)
+	dlErr := dl.Download(dlCtx, job.URL, outDir, opts, io.Discard)
+	dlCancel()
+	if dlErr != nil {
+		log.Error("yt-dlp failed", "job_id", job.ID, "stderr", stderrBuf.String())
+		return fmt.Errorf("yt-dlp: %w", dlErr)
 	}
 
 	infoPath, err := findInfoJSON(outDir)

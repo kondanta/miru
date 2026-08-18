@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -38,7 +39,10 @@ const jwtTTL = 24 * time.Hour
 // timing when the requested username does not exist, preventing user
 // enumeration via response-time differences.
 var dummyHash = func() string {
-	h, _ := auth.HashPassword("miru-dummy-password-for-timing-normalization")
+	h, err := auth.HashPassword("miru-dummy-password-for-timing-normalization")
+	if err != nil {
+		panic(fmt.Errorf("dummyHash init: %w", err))
+	}
 	return h
 }()
 
@@ -395,37 +399,38 @@ func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Apply only the fields that were provided.
+	// Build a single UPDATE from whichever fields were provided.
+	setClauses := make([]string, 0, 3)
+	args := make([]any, 0, 4)
 	if req.Quality != nil {
-		if _, err := s.db.ExecContext(r.Context(),
-			`UPDATE users SET quality = ? WHERE id = ?`, *req.Quality, claims.Subject,
-		); err != nil {
-			s.log.Error("patch user quality", "err", err)
-			writeJSON(w, http.StatusInternalServerError, errBody("internal server error"))
-			return
-		}
+		setClauses = append(setClauses, "quality = ?")
+		args = append(args, *req.Quality)
 	}
 	if req.SponsorBlock != nil {
 		sb := 0
 		if *req.SponsorBlock {
 			sb = 1
 		}
-		if _, err := s.db.ExecContext(r.Context(),
-			`UPDATE users SET sponsorblock = ? WHERE id = ?`, sb, claims.Subject,
-		); err != nil {
-			s.log.Error("patch user sponsorblock", "err", err)
-			writeJSON(w, http.StatusInternalServerError, errBody("internal server error"))
-			return
-		}
+		setClauses = append(setClauses, "sponsorblock = ?")
+		args = append(args, sb)
 	}
 	if req.GraceHours != nil {
-		if _, err := s.db.ExecContext(r.Context(),
-			`UPDATE users SET grace_hours = ? WHERE id = ?`, *req.GraceHours, claims.Subject,
-		); err != nil {
-			s.log.Error("patch user grace_hours", "err", err)
-			writeJSON(w, http.StatusInternalServerError, errBody("internal server error"))
-			return
-		}
+		setClauses = append(setClauses, "grace_hours = ?")
+		args = append(args, *req.GraceHours)
+	}
+
+	if len(setClauses) == 0 {
+		// Nothing to update — return current state.
+		s.handleGetUser(w, r)
+		return
+	}
+
+	args = append(args, claims.Subject)
+	query := "UPDATE users SET " + strings.Join(setClauses, ", ") + " WHERE id = ?"
+	if _, err := s.db.ExecContext(r.Context(), query, args...); err != nil {
+		s.log.Error("patch user", "err", err)
+		writeJSON(w, http.StatusInternalServerError, errBody("internal server error"))
+		return
 	}
 
 	// Return the updated user.
@@ -564,6 +569,10 @@ func (s *Server) handleCreateDownload(w http.ResponseWriter, r *http.Request) {
 		Quality:      quality,
 		SponsorBlock: userSponsorBlock == 1,
 	}) {
+		// Enqueue rejected — server is shutting down. Remove the just-inserted row
+		// so the DB stays consistent; use a background context since request ctx may
+		// already be done.
+		_, _ = s.db.ExecContext(context.Background(), `DELETE FROM downloads WHERE id = ?`, id)
 		writeJSON(w, http.StatusServiceUnavailable, errBody("server is shutting down, try again"))
 		return
 	}
@@ -635,17 +644,22 @@ func (s *Server) handleDeleteDownload(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	if _, err := s.db.ExecContext(r.Context(),
-		`UPDATE downloads SET status='deleted', updated_at=? WHERE id=?`, now, id,
+		`UPDATE downloads SET status='deleted', updated_at=? WHERE id=? AND user_id=?`, now, id, claims.Subject,
 	); err != nil {
 		s.log.Error("delete download update", "err", err)
 		writeJSON(w, http.StatusInternalServerError, errBody("internal server error"))
 		return
 	}
 
-	// Remove the download directory (parent of the file) from disk.
+	// Remove the per-download directory from disk, verifying it is contained
+	// within cfg.DownloadsDir to prevent path traversal if file_path is tampered.
 	if filePath.Valid && filePath.String != "" {
 		dir := filepath.Dir(filePath.String)
-		if err := os.RemoveAll(dir); err != nil {
+		rel, err := filepath.Rel(s.cfg.DownloadsDir, dir)
+		if err != nil || strings.HasPrefix(rel, "..") {
+			s.log.Warn("delete download: file_path outside downloads dir, skipping removal",
+				"download_id", id, "path", dir)
+		} else if err := os.RemoveAll(dir); err != nil {
 			s.log.Warn("delete download: remove files", "download_id", id, "err", err)
 		}
 	}
@@ -724,6 +738,10 @@ func (s *Server) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errBody("username and password are required"))
 		return
 	}
+	if len(req.Password) < 8 || len(req.Password) > 72 {
+		writeJSON(w, http.StatusBadRequest, errBody("password must be between 8 and 72 bytes"))
+		return
+	}
 
 	hash, err := auth.HashPassword(req.Password)
 	if err != nil {
@@ -753,15 +771,18 @@ func (s *Server) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, userResponse{
-		ID:           id,
-		Username:     req.Username,
-		IsAdmin:      req.IsAdmin,
-		Quality:      "1080p",
-		SponsorBlock: true,
-		GraceHours:   24,
-		CreatedAt:    now,
-	})
+	var u userResponse
+	var sb int
+	if err := s.db.QueryRowContext(r.Context(),
+		`SELECT id, username, is_admin, quality, sponsorblock, grace_hours, created_at
+		 FROM users WHERE id = ?`, id,
+	).Scan(&u.ID, &u.Username, &u.IsAdmin, &u.Quality, &sb, &u.GraceHours, &u.CreatedAt); err != nil {
+		s.log.Error("admin create user: read back", "err", err)
+		writeJSON(w, http.StatusInternalServerError, errBody("internal server error"))
+		return
+	}
+	u.SponsorBlock = sb == 1
+	writeJSON(w, http.StatusCreated, u)
 }
 
 func (s *Server) handleAdminDeleteUser(w http.ResponseWriter, r *http.Request) {
@@ -773,7 +794,22 @@ func (s *Server) handleAdminDeleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := s.db.ExecContext(r.Context(), `DELETE FROM users WHERE id = ?`, id)
+	tx, err := s.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		s.log.Error("admin delete user: begin tx", "err", err)
+		writeJSON(w, http.StatusInternalServerError, errBody("internal server error"))
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Remove downloads first to satisfy the FK constraint.
+	if _, err := tx.ExecContext(r.Context(), `DELETE FROM downloads WHERE user_id = ?`, id); err != nil {
+		s.log.Error("admin delete user: delete downloads", "err", err)
+		writeJSON(w, http.StatusInternalServerError, errBody("internal server error"))
+		return
+	}
+
+	result, err := tx.ExecContext(r.Context(), `DELETE FROM users WHERE id = ?`, id)
 	if err != nil {
 		s.log.Error("admin delete user", "err", err)
 		writeJSON(w, http.StatusInternalServerError, errBody("internal server error"))
@@ -781,6 +817,12 @@ func (s *Server) handleAdminDeleteUser(w http.ResponseWriter, r *http.Request) {
 	}
 	if n, _ := result.RowsAffected(); n == 0 {
 		writeJSON(w, http.StatusNotFound, errBody("user not found"))
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		s.log.Error("admin delete user: commit", "err", err)
+		writeJSON(w, http.StatusInternalServerError, errBody("internal server error"))
 		return
 	}
 
