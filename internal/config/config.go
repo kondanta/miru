@@ -202,8 +202,12 @@ func applyEnv(cfg *Config) error {
 	}
 	if v := os.Getenv("MIRU_DOWNLOAD_TIMEOUT_HOURS"); v != "" {
 		h, err := strconv.Atoi(v)
-		if err != nil || h < 1 {
-			return fmt.Errorf("MIRU_DOWNLOAD_TIMEOUT_HOURS %q: must be a positive integer", v)
+		if err != nil || h < 1 || int64(h) > maxDownloadTimeoutHours {
+			return fmt.Errorf(
+				"MIRU_DOWNLOAD_TIMEOUT_HOURS %q: must be a positive integer <= %d",
+				v,
+				maxDownloadTimeoutHours,
+			)
 		}
 		cfg.DownloadTimeoutHours = h
 	}
@@ -317,6 +321,10 @@ func applyDefaults(cfg *Config) {
 	}
 }
 
+// maxDownloadTimeoutHours is math.MaxInt64 / int64(time.Hour) — the largest
+// value that can be safely converted to time.Duration without overflow.
+const maxDownloadTimeoutHours = math.MaxInt64 / int64(3_600_000_000_000)
+
 var validLogLevels = map[string]bool{
 	"debug": true, "info": true, "warn": true, "error": true,
 }
@@ -342,6 +350,11 @@ func (cfg *Config) validate() error {
 		errs = append(errs, fmt.Sprintf("log_level %q must be one of: debug, info, warn, error", cfg.LogLevel))
 	}
 
+	if cfg.DownloadTimeoutHours < 1 || int64(cfg.DownloadTimeoutHours) > maxDownloadTimeoutHours {
+		errs = append(errs, fmt.Sprintf(
+			"download_timeout_hours %d out of range [1, %d]", cfg.DownloadTimeoutHours, maxDownloadTimeoutHours,
+		))
+	}
 	if *cfg.NFO.MaxTags < 1 {
 		errs = append(errs, "nfo.max_tags must be >= 1")
 	}
