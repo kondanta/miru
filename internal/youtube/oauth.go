@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"golang.org/x/oauth2"
@@ -22,6 +23,11 @@ import (
 // https://www.googleapis.com/auth/youtube covers playlistItems.list and
 // playlistItems.delete — the minimum needed for Watch Later polling.
 const Scope = "https://www.googleapis.com/auth/youtube"
+
+// RedirectURI returns the OAuth callback URL for the given base URL.
+func RedirectURI(baseURL string) string {
+	return strings.TrimRight(baseURL, "/") + "/api/v1/watch-later/auth/callback"
+}
 
 // OAuthConfig builds a golang.org/x/oauth2 Config for the Google YouTube scope.
 // redirectURL must be the fully-qualified callback URL (e.g. baseURL + "/api/v1/watch-later/auth/callback").
@@ -109,24 +115,39 @@ func decrypt(key []byte, b64 string) (string, error) {
 }
 
 // SaveToken encrypts and persists the OAuth token for userID into youtube_tokens.
+// When t.RefreshToken is empty (Google does not return a new one on standard
+// token refresh), the stored refresh token is preserved unchanged.
 func SaveToken(ctx context.Context, db *sql.DB, encKey []byte, userID string, t *oauth2.Token) error {
 	encAccess, err := encrypt(encKey, t.AccessToken)
 	if err != nil {
 		return fmt.Errorf("encrypt access_token: %w", err)
 	}
-	encRefresh, err := encrypt(encKey, t.RefreshToken)
-	if err != nil {
-		return fmt.Errorf("encrypt refresh_token: %w", err)
-	}
 	expiry := t.Expiry.UTC().Format(time.RFC3339)
+
+	if t.RefreshToken != "" {
+		encRefresh, err := encrypt(encKey, t.RefreshToken)
+		if err != nil {
+			return fmt.Errorf("encrypt refresh_token: %w", err)
+		}
+		_, err = db.ExecContext(ctx, `
+			INSERT INTO youtube_tokens (user_id, access_token, refresh_token, expiry)
+			VALUES (?, ?, ?, ?)
+			ON CONFLICT(user_id) DO UPDATE SET
+				access_token  = excluded.access_token,
+				refresh_token = excluded.refresh_token,
+				expiry        = excluded.expiry`,
+			userID, encAccess, encRefresh, expiry,
+		)
+		return err
+	}
+
 	_, err = db.ExecContext(ctx, `
 		INSERT INTO youtube_tokens (user_id, access_token, refresh_token, expiry)
-		VALUES (?, ?, ?, ?)
+		VALUES (?, ?, '', ?)
 		ON CONFLICT(user_id) DO UPDATE SET
-			access_token  = excluded.access_token,
-			refresh_token = excluded.refresh_token,
-			expiry        = excluded.expiry`,
-		userID, encAccess, encRefresh, expiry,
+			access_token = excluded.access_token,
+			expiry       = excluded.expiry`,
+		userID, encAccess, expiry,
 	)
 	return err
 }
@@ -176,21 +197,25 @@ func DeleteToken(ctx context.Context, db *sql.DB, encKey []byte, userID string) 
 
 // revokeToken calls Google's token revocation endpoint.
 func revokeToken(ctx context.Context, refreshToken string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+	revokeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	body := url.Values{"token": {refreshToken}}.Encode()
+	req, err := http.NewRequestWithContext(revokeCtx, http.MethodPost,
 		"https://oauth2.googleapis.com/revoke",
-		nil,
+		strings.NewReader(body),
 	)
 	if err != nil {
 		return err
 	}
-	q := url.Values{}
-	q.Set("token", refreshToken)
-	req.URL.RawQuery = q.Encode()
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
 	}
 	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("revoke: HTTP %d", resp.StatusCode)
+	}
 	return nil
 }
 

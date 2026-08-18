@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -77,27 +78,32 @@ func pollAll(ctx context.Context, d PollDeps) {
 
 	now := time.Now().UTC()
 	var candidates []pollCandidate
-	for rows.Next() {
-		var (
-			userID        string
-			intervalMin   int
-			lastPolledStr sql.NullString
-			quality       string
-			playlistID    string
-		)
-		if err := rows.Scan(&userID, &intervalMin, &lastPolledStr, &quality, &playlistID); err != nil {
-			d.Log.Error("wl poller: scan user", "err", err)
-			continue
+	func() {
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var (
+				userID        string
+				intervalMin   int
+				lastPolledStr sql.NullString
+				quality       string
+				playlistID    string
+			)
+			if err := rows.Scan(&userID, &intervalMin, &lastPolledStr, &quality, &playlistID); err != nil {
+				d.Log.Error("wl poller: scan user", "err", err)
+				continue
+			}
+			var lastPolled time.Time
+			if lastPolledStr.Valid && lastPolledStr.String != "" {
+				lastPolled, _ = time.Parse(time.RFC3339, lastPolledStr.String)
+			}
+			if now.Sub(lastPolled) >= time.Duration(intervalMin)*time.Minute {
+				candidates = append(candidates, pollCandidate{userID, intervalMin, lastPolled, quality, playlistID})
+			}
 		}
-		var lastPolled time.Time
-		if lastPolledStr.Valid && lastPolledStr.String != "" {
-			lastPolled, _ = time.Parse(time.RFC3339, lastPolledStr.String)
+		if err := rows.Err(); err != nil {
+			d.Log.Error("wl poller: iterate users", "err", err)
 		}
-		if now.Sub(lastPolled) >= time.Duration(intervalMin)*time.Minute {
-			candidates = append(candidates, pollCandidate{userID, intervalMin, lastPolled, quality, playlistID})
-		}
-	}
-	_ = rows.Close()
+	}()
 
 	for _, c := range candidates {
 		pollUser(ctx, d, c.userID, c.quality, c.playlistID, now)
@@ -123,8 +129,10 @@ func pollUser(ctx context.Context, d PollDeps, userID, quality, playlistID strin
 		return
 	}
 
-	client := TokenClient(ctx, d.OAuthCfg, tok)
-	items, err := ListWatchLater(ctx, client, playlistID)
+	apiCtx, apiCancel := context.WithTimeout(ctx, 30*time.Second)
+	client := TokenClient(apiCtx, d.OAuthCfg, tok)
+	items, err := ListWatchLater(apiCtx, client, playlistID)
+	apiCancel()
 	if err != nil {
 		d.Log.Error("wl poller: list playlist", "user_id", userID, "playlist_id", playlistID, "err", err)
 		return
@@ -171,7 +179,10 @@ func enqueueIfNew(ctx context.Context, d PollDeps, userID, quality string, item 
 		}
 		// Check status: only retry if failed.
 		var status string
-		_ = d.DB.QueryRowContext(ctx, `SELECT status FROM downloads WHERE id=?`, existingID).Scan(&status)
+		row := d.DB.QueryRowContext(ctx, `SELECT status FROM downloads WHERE id=?`, existingID)
+		if err := row.Scan(&status); err != nil {
+			return false, fmt.Errorf("check status for %s: %w", existingID, err)
+		}
 		if status != "failed" {
 			return false, nil // queued/downloading/done/deleted — skip
 		}
@@ -186,10 +197,10 @@ func enqueueIfNew(ctx context.Context, d PollDeps, userID, quality string, item 
 		INSERT INTO downloads
 		  (id, user_id, youtube_id, title, status, quality, sponsorblock,
 		   source, playlist_item_id, wl_retry_count, created_at, updated_at)
-		SELECT ?, ?, ?, ?, 'queued', ?, sponsorblock, 'watch_later', ?, 0, ?, ?
+		SELECT ?, ?, ?, ?, 'queued', ?, sponsorblock, 'watch_later', ?, ?, ?, ?
 		FROM users WHERE id=?`,
 		id, userID, item.VideoID, item.Title, quality,
-		item.ID, now, now, userID,
+		item.ID, retryCount, now, now, userID,
 	); err != nil {
 		return false, err
 	}

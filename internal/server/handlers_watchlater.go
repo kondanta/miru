@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"regexp"
 
 	"github.com/kondanta/miru/internal/youtube"
 	"golang.org/x/oauth2"
@@ -88,6 +89,11 @@ func (s *Server) handlePutWatchLater(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.applyWatchLaterUpdate(r, claims.Subject, req); err != nil {
+		if errors.Is(err, errInvalidPlaylistID) {
+			const msg = `invalid playlist_id; must be a regular YouTube playlist ID (e.g. "PLxxxxxx"), not "WL"`
+			writeJSON(w, http.StatusBadRequest, errBody(msg))
+			return
+		}
 		s.log.Error("put watch later", "err", err)
 		writeJSON(w, http.StatusInternalServerError, errBody("internal server error"))
 		return
@@ -130,9 +136,13 @@ func (s *Server) applyWatchLaterUpdate(r *http.Request, userID string, req patch
 		}
 	}
 	if req.PlaylistID != nil {
+		pid := *req.PlaylistID
+		if pid == "WL" || !isValidPlaylistID(pid) {
+			return errInvalidPlaylistID
+		}
 		if _, err := tx.ExecContext(r.Context(),
 			`UPDATE watch_later_configs SET playlist_id=? WHERE user_id=?`,
-			*req.PlaylistID, userID,
+			pid, userID,
 		); err != nil {
 			return err
 		}
@@ -141,6 +151,13 @@ func (s *Server) applyWatchLaterUpdate(r *http.Request, userID string, req patch
 }
 
 const maxPollInterval = 4320 // 72 hours in minutes
+
+var (
+	playlistIDRe         = regexp.MustCompile(`^PL[A-Za-z0-9_-]{8,38}$`)
+	errInvalidPlaylistID = errors.New("invalid playlist_id")
+)
+
+func isValidPlaylistID(id string) bool { return playlistIDRe.MatchString(id) }
 
 func (s *Server) handleWatchLaterAuth(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.Google == nil {
@@ -152,19 +169,21 @@ func (s *Server) handleWatchLaterAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// state encodes the user ID so the callback can associate the token.
-	// This is a simple personal deployment with no CSRF exposure, but using
-	// the user ID as state is still correct: it binds the callback to the
-	// initiating session.
 	cfg := youtube.OAuthConfig(
 		s.cfg.Google.ClientID,
 		s.cfg.Google.ClientSecret,
-		s.cfg.BaseURL+"/api/v1/watch-later/auth/callback",
+		youtube.RedirectURI(s.cfg.BaseURL),
 	)
+	state, err := s.oauthStates.create(claims.Subject)
+	if err != nil {
+		s.log.Error("watch later auth: generate state", "err", err)
+		writeJSON(w, http.StatusInternalServerError, errBody("internal server error"))
+		return
+	}
 	// access_type=offline: request a refresh token (not just an access token).
 	// prompt=consent: force Google to re-issue a refresh token even if the user
 	// previously authorized the app — critical after a disconnect/revoke.
-	authURL := cfg.AuthCodeURL(claims.Subject,
+	authURL := cfg.AuthCodeURL(state,
 		oauth2.AccessTypeOffline,
 		oauth2.SetAuthURLParam("prompt", "consent"),
 	)
@@ -177,17 +196,22 @@ func (s *Server) handleWatchLaterAuthCallback(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	userID := r.URL.Query().Get("state")
+	state := r.URL.Query().Get("state")
 	code := r.URL.Query().Get("code")
-	if userID == "" || code == "" {
+	if state == "" || code == "" {
 		writeJSON(w, http.StatusBadRequest, errBody("missing state or code"))
+		return
+	}
+	userID, ok := s.oauthStates.consume(state)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, errBody("invalid or expired OAuth state"))
 		return
 	}
 
 	oauthCfg := youtube.OAuthConfig(
 		s.cfg.Google.ClientID,
 		s.cfg.Google.ClientSecret,
-		s.cfg.BaseURL+"/api/v1/watch-later/auth/callback",
+		youtube.RedirectURI(s.cfg.BaseURL),
 	)
 	tok, err := oauthCfg.Exchange(r.Context(), code)
 	if err != nil {

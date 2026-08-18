@@ -125,6 +125,42 @@ func (l *loginLimiter) clearFailures(username string) {
 	delete(l.buckets, username)
 }
 
+type oauthStateEntry struct {
+	userID    string
+	expiresAt time.Time
+}
+
+type oauthStateStore struct {
+	mu      sync.Mutex
+	entries map[string]oauthStateEntry
+}
+
+func (s *oauthStateStore) create(userID string) (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate oauth state: %w", err)
+	}
+	state := hex.EncodeToString(b)
+	s.mu.Lock()
+	s.entries[state] = oauthStateEntry{userID: userID, expiresAt: time.Now().Add(5 * time.Minute)}
+	s.mu.Unlock()
+	return state, nil
+}
+
+func (s *oauthStateStore) consume(state string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.entries[state]
+	if !ok {
+		return "", false
+	}
+	delete(s.entries, state)
+	if time.Now().After(entry.expiresAt) {
+		return "", false
+	}
+	return entry.userID, true
+}
+
 // Server holds shared dependencies for all HTTP handlers.
 type Server struct {
 	db           *sql.DB
@@ -134,6 +170,7 @@ type Server struct {
 	log          *slog.Logger
 	web          fs.FS
 	loginLimiter *loginLimiter
+	oauthStates  *oauthStateStore
 }
 
 // New creates a Server. web is the embedded SPA filesystem (may be nil to
@@ -154,6 +191,7 @@ func New(
 		log:          log,
 		web:          web,
 		loginLimiter: newLoginLimiter(10, 10, 10*time.Minute),
+		oauthStates:  &oauthStateStore{entries: make(map[string]oauthStateEntry)},
 	}
 }
 

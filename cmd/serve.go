@@ -88,7 +88,7 @@ func serve(ctx context.Context, cfg *config.Config) error {
 		oauthCfg := youtube.OAuthConfig(
 			cfg.Google.ClientID,
 			cfg.Google.ClientSecret,
-			cfg.BaseURL+"/api/v1/watch-later/auth/callback",
+			youtube.RedirectURI(cfg.BaseURL),
 		)
 		go youtube.RunPoller(ctx, youtube.PollDeps{
 			DB:       database,
@@ -274,7 +274,7 @@ func newWorker(database *sql.DB, dl *downloader.Manager, cfg *config.Config, log
 			oauthCfg := youtube.OAuthConfig(
 				cfg.Google.ClientID,
 				cfg.Google.ClientSecret,
-				cfg.BaseURL+"/api/v1/watch-later/auth/callback",
+				youtube.RedirectURI(cfg.BaseURL),
 			)
 			tok, err := youtube.LoadToken(ctx, database, []byte(cfg.EncryptionKey), job.UserID)
 			if err != nil {

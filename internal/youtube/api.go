@@ -50,6 +50,10 @@ func ListWatchLater(ctx context.Context, client *http.Client, playlistID string)
 			return nil, fmt.Errorf("playlistItems.list: %w", err)
 		}
 
+		if resp.StatusCode != http.StatusOK {
+			_ = resp.Body.Close()
+			return nil, fmt.Errorf("playlistItems.list: HTTP %d", resp.StatusCode)
+		}
 		var page struct {
 			NextPageToken string `json:"nextPageToken"`
 			Items         []struct {
@@ -66,9 +70,6 @@ func ListWatchLater(ctx context.Context, client *http.Client, playlistID string)
 		_ = resp.Body.Close()
 		if err != nil {
 			return nil, fmt.Errorf("decode response: %w", err)
-		}
-		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("playlistItems.list: HTTP %d", resp.StatusCode)
 		}
 
 		for _, it := range page.Items {
@@ -104,7 +105,7 @@ func DeletePlaylistItem(ctx context.Context, client *http.Client, itemID string)
 		return fmt.Errorf("playlistItems.delete: %w", err)
 	}
 	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent {
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
 		return fmt.Errorf("playlistItems.delete: HTTP %d", resp.StatusCode)
 	}
 	return nil

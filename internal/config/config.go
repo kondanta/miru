@@ -360,6 +360,7 @@ func applyJellyfinEnv(cfg *Config) {
 }
 
 func applyDefaults(cfg *Config) {
+	cfg.BaseURL = strings.TrimRight(cfg.BaseURL, "/")
 	if cfg.Port == 0 {
 		cfg.Port = DefaultPort
 	}
