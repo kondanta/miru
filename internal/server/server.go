@@ -297,3 +297,14 @@ func newRequestID() string {
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
 }
+
+// claimsFrom extracts JWT claims from the request context. On failure it writes
+// a 401 response and returns false; the caller must return immediately.
+func claimsFrom(w http.ResponseWriter, r *http.Request) (*auth.Claims, bool) {
+	claims, ok := r.Context().Value(keyClaims).(*auth.Claims)
+	if !ok || claims == nil {
+		writeJSON(w, http.StatusUnauthorized, errBody("unauthorized"))
+		return nil, false
+	}
+	return claims, true
+}

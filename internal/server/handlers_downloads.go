@@ -13,7 +13,6 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
-	"github.com/kondanta/miru/internal/auth"
 	"github.com/kondanta/miru/internal/downloader"
 	"github.com/kondanta/miru/internal/queue"
 	"github.com/kondanta/miru/internal/youtube"
@@ -36,7 +35,10 @@ type downloadRecord struct {
 }
 
 func (s *Server) handleListDownloads(w http.ResponseWriter, r *http.Request) {
-	claims, _ := r.Context().Value(keyClaims).(*auth.Claims)
+	claims, ok := claimsFrom(w, r)
+	if !ok {
+		return
+	}
 
 	rows, err := s.db.QueryContext(r.Context(), `
 		SELECT id, youtube_id, title, status, quality, sponsorblock, source,
@@ -84,7 +86,10 @@ type createDownloadRequest struct {
 }
 
 func (s *Server) handleCreateDownload(w http.ResponseWriter, r *http.Request) {
-	claims, _ := r.Context().Value(keyClaims).(*auth.Claims)
+	claims, ok := claimsFrom(w, r)
+	if !ok {
+		return
+	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, 4096)
 	var req createDownloadRequest
@@ -171,7 +176,10 @@ func (s *Server) handleCreateDownload(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetDownload(w http.ResponseWriter, r *http.Request) {
-	claims, _ := r.Context().Value(keyClaims).(*auth.Claims)
+	claims, ok := claimsFrom(w, r)
+	if !ok {
+		return
+	}
 	id := chi.URLParam(r, "id")
 
 	var d downloadRecord
@@ -201,7 +209,10 @@ func (s *Server) handleGetDownload(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteDownload(w http.ResponseWriter, r *http.Request) {
-	claims, _ := r.Context().Value(keyClaims).(*auth.Claims)
+	claims, ok := claimsFrom(w, r)
+	if !ok {
+		return
+	}
 	id := chi.URLParam(r, "id")
 
 	// Fetch file_path before marking deleted so we can clean up disk.
@@ -229,18 +240,27 @@ func (s *Server) handleDeleteDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Remove the per-download directory from disk, verifying it is contained
-	// within cfg.DownloadsDir to prevent path traversal if file_path is tampered.
-	if filePath.Valid && filePath.String != "" {
-		dir := filepath.Dir(filePath.String)
-		rel, err := filepath.Rel(s.cfg.DownloadsDir, dir)
-		if err != nil || strings.HasPrefix(rel, "..") {
-			s.log.Warn("delete download: file_path outside downloads dir, skipping removal",
-				"download_id", id, "path", dir)
-		} else if err := os.RemoveAll(dir); err != nil {
-			s.log.Warn("delete download: remove files", "download_id", id, "err", err)
-		}
+	if filePath.Valid {
+		s.removeDownloadDir(filePath.String, id)
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// removeDownloadDir removes the per-download directory for filePath, verifying
+// it is contained within cfg.DownloadsDir. Safe to call with an empty path.
+func (s *Server) removeDownloadDir(filePath, contextID string) {
+	if filePath == "" {
+		return
+	}
+	dir := filepath.Dir(filePath)
+	rel, err := filepath.Rel(s.cfg.DownloadsDir, dir)
+	if err != nil || strings.HasPrefix(rel, "..") || rel == "." {
+		s.log.Warn("file_path outside downloads dir, skipping removal",
+			"id", contextID, "path", dir)
+		return
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		s.log.Warn("remove download dir", "id", contextID, "err", err)
+	}
 }

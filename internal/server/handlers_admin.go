@@ -2,13 +2,15 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/kondanta/miru/internal/auth"
+	sqlite "modernc.org/sqlite"
+	sqlitelib "modernc.org/sqlite/lib"
 )
 
 type adminCreateUserRequest struct {
@@ -82,8 +84,8 @@ func (s *Server) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
 		 VALUES (?, ?, ?, ?, ?)`,
 		id, req.Username, hash, isAdmin, now,
 	); err != nil {
-		// SQLite unique constraint on username returns a specific error string.
-		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+		if sqliteErr, ok := errors.AsType[*sqlite.Error](err); ok &&
+			sqliteErr.Code() == sqlitelib.SQLITE_CONSTRAINT_UNIQUE {
 			writeJSON(w, http.StatusConflict, errBody("username already exists"))
 			return
 		}
@@ -105,7 +107,10 @@ func (s *Server) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAdminDeleteUser(w http.ResponseWriter, r *http.Request) {
-	claims, _ := r.Context().Value(keyClaims).(*auth.Claims)
+	claims, ok := claimsFrom(w, r)
+	if !ok {
+		return
+	}
 	id := chi.URLParam(r, "id")
 
 	if id == claims.Subject {
@@ -120,6 +125,24 @@ func (s *Server) handleAdminDeleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	// Collect file paths before deleting rows so we can clean up disk after commit.
+	fpRows, err := tx.QueryContext(r.Context(),
+		`SELECT file_path FROM downloads WHERE user_id = ? AND file_path IS NOT NULL`, id,
+	)
+	if err != nil {
+		s.log.Error("admin delete user: collect file paths", "err", err)
+		writeJSON(w, http.StatusInternalServerError, errBody("internal server error"))
+		return
+	}
+	var filePaths []string
+	for fpRows.Next() {
+		var fp string
+		if err := fpRows.Scan(&fp); err == nil && fp != "" {
+			filePaths = append(filePaths, fp)
+		}
+	}
+	_ = fpRows.Close()
 
 	// Remove downloads first to satisfy the FK constraint.
 	if _, err := tx.ExecContext(r.Context(), `DELETE FROM downloads WHERE user_id = ?`, id); err != nil {
@@ -143,6 +166,11 @@ func (s *Server) handleAdminDeleteUser(w http.ResponseWriter, r *http.Request) {
 		s.log.Error("admin delete user: commit", "err", err)
 		writeJSON(w, http.StatusInternalServerError, errBody("internal server error"))
 		return
+	}
+
+	// Remove per-download directories from disk after the transaction is committed.
+	for _, fp := range filePaths {
+		s.removeDownloadDir(fp, id)
 	}
 
 	w.WriteHeader(http.StatusNoContent)

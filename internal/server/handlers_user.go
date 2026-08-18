@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/kondanta/miru/internal/auth"
 	"github.com/kondanta/miru/internal/downloader"
 )
 
@@ -40,7 +39,10 @@ func scanUser(row scanner, u *userResponse) error {
 }
 
 func (s *Server) handleGetUser(w http.ResponseWriter, r *http.Request) {
-	claims, _ := r.Context().Value(keyClaims).(*auth.Claims)
+	claims, ok := claimsFrom(w, r)
+	if !ok {
+		return
+	}
 
 	var u userResponse
 	err := scanUser(s.db.QueryRowContext(r.Context(),
@@ -67,7 +69,10 @@ type patchUserRequest struct {
 }
 
 func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
-	claims, _ := r.Context().Value(keyClaims).(*auth.Claims)
+	claims, ok := claimsFrom(w, r)
+	if !ok {
+		return
+	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, 4096)
 	var req patchUserRequest
