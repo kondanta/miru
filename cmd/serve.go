@@ -73,11 +73,11 @@ func serve(ctx context.Context, cfg *config.Config) error {
 		return err
 	}
 
-	// TODO(recovery): on startup, reload downloads with status 'queued' or
-	// 'downloading' from the DB and re-enqueue them. Without this, any download
-	// in-flight at crash time is stuck permanently. Fix before the Watch Later
-	// poller lands — background downloads make stuck-on-restart much more likely.
 	queueMgr := queue.New(ctx, newWorker(database, dl, cfg, log), log)
+
+	if err := reconcileDownloads(ctx, database, queueMgr, log); err != nil {
+		return fmt.Errorf("reconcile downloads: %w", err)
+	}
 
 	srv := server.New(database, cfg, queueMgr, log, web.DistDirFS)
 
@@ -161,6 +161,56 @@ func bootstrapAdmin(ctx context.Context, database *sql.DB, log *slog.Logger) err
 	return nil
 }
 
+// reconcileDownloads re-enqueues rows left in 'queued' state and resets
+// 'downloading' rows back to 'queued' before re-enqueuing them. Both states
+// indicate work that was interrupted by a crash or restart and should be retried.
+// The video URL is reconstructed from the stored youtube_id.
+func reconcileDownloads(ctx context.Context, database *sql.DB, q *queue.Manager, log *slog.Logger) error {
+	// Reset any rows stuck in 'downloading' — the worker was interrupted mid-flight.
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := database.ExecContext(ctx,
+		`UPDATE downloads SET status='queued', updated_at=? WHERE status='downloading'`, now,
+	); err != nil {
+		return fmt.Errorf("reset downloading rows: %w", err)
+	}
+
+	rows, err := database.QueryContext(ctx,
+		`SELECT id, user_id, youtube_id, quality, sponsorblock FROM downloads WHERE status='queued'`,
+	)
+	if err != nil {
+		return fmt.Errorf("query queued downloads: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var count int
+	for rows.Next() {
+		var (
+			id, userID, youtubeID, quality string
+			sponsorblock                   int
+		)
+		if err := rows.Scan(&id, &userID, &youtubeID, &quality, &sponsorblock); err != nil {
+			return fmt.Errorf("scan queued download: %w", err)
+		}
+		q.Enqueue(queue.Job{
+			ID:           id,
+			UserID:       userID,
+			YoutubeID:    youtubeID,
+			URL:          "https://www.youtube.com/watch?v=" + youtubeID,
+			Quality:      quality,
+			SponsorBlock: sponsorblock == 1,
+		})
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate queued downloads: %w", err)
+	}
+
+	if count > 0 {
+		log.Info("reconciled downloads on startup", "count", count)
+	}
+	return nil
+}
+
 // newWorker returns the WorkerFunc that drives the full download pipeline:
 // yt-dlp → NFO generation → poster download → DB status update.
 func newWorker(database *sql.DB, dl *downloader.Manager, cfg *config.Config, log *slog.Logger) queue.WorkerFunc {
@@ -169,6 +219,7 @@ func newWorker(database *sql.DB, dl *downloader.Manager, cfg *config.Config, log
 		if _, err := database.ExecContext(ctx,
 			`UPDATE downloads SET status='downloading', updated_at=? WHERE id=?`, now, job.ID,
 		); err != nil {
+			markFailed(database, job.ID, log)
 			return fmt.Errorf("worker: mark downloading: %w", err)
 		}
 
@@ -206,7 +257,7 @@ func runDownload(
 	dlCancel()
 	if dlErr != nil {
 		log.Error("yt-dlp failed", "job_id", job.ID, "stderr", stderrBuf.String())
-		return fmt.Errorf("yt-dlp: %w", dlErr)
+		return dlErr
 	}
 
 	infoPath, err := findInfoJSON(outDir)

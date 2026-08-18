@@ -569,10 +569,14 @@ func (s *Server) handleCreateDownload(w http.ResponseWriter, r *http.Request) {
 		Quality:      quality,
 		SponsorBlock: userSponsorBlock == 1,
 	}) {
-		// Enqueue rejected — server is shutting down. Remove the just-inserted row
-		// so the DB stays consistent; use a background context since request ctx may
+		// Enqueue rejected — server is shutting down. Mark the row failed so the
+		// client can see what happened; use a fresh context since request ctx may
 		// already be done.
-		_, _ = s.db.ExecContext(context.Background(), `DELETE FROM downloads WHERE id = ?`, id)
+		failCtx, failCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_, _ = s.db.ExecContext(failCtx,
+			`UPDATE downloads SET status='failed', updated_at=? WHERE id=?`,
+			time.Now().UTC().Format(time.RFC3339), id)
+		failCancel()
 		writeJSON(w, http.StatusServiceUnavailable, errBody("server is shutting down, try again"))
 		return
 	}
