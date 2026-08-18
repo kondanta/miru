@@ -45,12 +45,17 @@ var dummyHash = func() string {
 // loginLimiter is a per-username fixed-window rate limiter for the login
 // endpoint. Keying by username means per-account throttling holds regardless of
 // how many source IPs an attacker rotates through.
-// Buckets for usernames that never retry are retained until process restart; at
-// the scale of a personal deployment this is not a concern.
+//
+// The map is capped at maxBuckets entries. When the cap is full a new username
+// is rejected with 429 until an existing bucket expires or a successful login
+// clears one. This is an acknowledged DoS tradeoff: an attacker can fill the
+// cap with 10 bogus usernames, temporarily blocking new login attempts. At
+// personal-deployment scale this is acceptable.
 type loginLimiter struct {
 	mu          sync.Mutex
 	buckets     map[string]loginBucket
 	maxAttempts int
+	maxBuckets  int
 	window      time.Duration
 }
 
@@ -59,32 +64,64 @@ type loginBucket struct {
 	resetAt time.Time
 }
 
-func newLoginLimiter(maxAttempts int, window time.Duration) *loginLimiter {
+func newLoginLimiter(maxAttempts, maxBuckets int, window time.Duration) *loginLimiter {
 	return &loginLimiter{
 		buckets:     make(map[string]loginBucket),
 		maxAttempts: maxAttempts,
+		maxBuckets:  maxBuckets,
 		window:      window,
 	}
 }
 
-// allow returns whether the username may proceed. retryAfter is seconds until
-// the window resets and is meaningful only when allowed is false.
-func (l *loginLimiter) allow(username string) (allowed bool, retryAfter int) {
+// isLimited reports whether username may proceed. It opportunistically removes
+// expired buckets on each call, which naturally frees cap slots over time.
+func (l *loginLimiter) isLimited(username string) (limited bool, retryAfter int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	now := time.Now()
+
+	// Opportunistic expiry sweep — bounded by maxBuckets so always O(maxBuckets).
+	for k, b := range l.buckets {
+		if now.After(b.resetAt) {
+			delete(l.buckets, k)
+		}
+	}
+
+	b, exists := l.buckets[username]
+	if !exists {
+		if len(l.buckets) >= l.maxBuckets {
+			// Cap full — reject until a slot opens.
+			return true, int(l.window.Seconds())
+		}
+		return false, 0
+	}
+	if b.count >= l.maxAttempts {
+		return true, int(b.resetAt.Sub(now).Seconds()) + 1
+	}
+	return false, 0
+}
+
+// recordFailure increments the failure count for username.
+func (l *loginLimiter) recordFailure(username string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	now := time.Now()
 	b := l.buckets[username]
 	if now.After(b.resetAt) {
-		b = loginBucket{count: 0, resetAt: now.Add(l.window)}
+		b = loginBucket{resetAt: now.Add(l.window)}
 	}
 	b.count++
 	l.buckets[username] = b
+}
 
-	if b.count > l.maxAttempts {
-		return false, int(b.resetAt.Sub(now).Seconds()) + 1
-	}
-	return true, 0
+// clearFailures removes the bucket for username after a successful login so
+// that legitimate repeated logins are never penalised and the slot is freed.
+func (l *loginLimiter) clearFailures(username string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.buckets, username)
 }
 
 // Server holds shared dependencies for all HTTP handlers.
@@ -106,7 +143,7 @@ func New(db *sql.DB, cfg *config.Config, q *queue.Manager, log *slog.Logger, web
 		queue:        q,
 		log:          log,
 		web:          web,
-		loginLimiter: newLoginLimiter(5, 15*time.Minute),
+		loginLimiter: newLoginLimiter(10, 10, 10*time.Minute),
 	}
 }
 

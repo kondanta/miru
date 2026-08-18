@@ -32,7 +32,7 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if allowed, retryAfter := s.loginLimiter.allow(req.Username); !allowed {
+	if limited, retryAfter := s.loginLimiter.isLimited(req.Username); limited {
 		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 		writeJSON(w, http.StatusTooManyRequests, errBody("too many login attempts, try again later"))
 		return
@@ -51,6 +51,7 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	if errors.Is(err, sql.ErrNoRows) {
 		// Normalize timing to prevent username enumeration.
 		_ = auth.CheckPassword(dummyHash, req.Password)
+		s.loginLimiter.recordFailure(req.Username)
 		writeJSON(w, http.StatusUnauthorized, errBody("invalid credentials"))
 		return
 	}
@@ -64,11 +65,13 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		// OIDC-only user has no password set — local login is not allowed.
 		// Run dummyHash to normalize response time and prevent OIDC-account enumeration.
 		_ = auth.CheckPassword(dummyHash, req.Password)
+		s.loginLimiter.recordFailure(req.Username)
 		writeJSON(w, http.StatusUnauthorized, errBody("invalid credentials"))
 		return
 	}
 
 	if err := auth.CheckPassword(passwordHash.String, req.Password); err != nil {
+		s.loginLimiter.recordFailure(req.Username)
 		writeJSON(w, http.StatusUnauthorized, errBody("invalid credentials"))
 		return
 	}
@@ -85,6 +88,7 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.loginLimiter.clearFailures(req.Username)
 	writeJSON(w, http.StatusOK, loginResponse{Token: token})
 }
 
