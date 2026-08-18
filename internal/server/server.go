@@ -19,6 +19,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/kondanta/miru/internal/auth"
 	"github.com/kondanta/miru/internal/config"
+	"github.com/kondanta/miru/internal/downloader"
 	"github.com/kondanta/miru/internal/queue"
 )
 
@@ -128,6 +129,7 @@ func (l *loginLimiter) clearFailures(username string) {
 type Server struct {
 	db           *sql.DB
 	cfg          *config.Config
+	dl           *downloader.Manager
 	queue        *queue.Manager
 	log          *slog.Logger
 	web          fs.FS
@@ -136,10 +138,18 @@ type Server struct {
 
 // New creates a Server. web is the embedded SPA filesystem (may be nil to
 // disable the catch-all SPA route during tests).
-func New(db *sql.DB, cfg *config.Config, q *queue.Manager, log *slog.Logger, web fs.FS) *Server {
+func New(
+	db *sql.DB,
+	cfg *config.Config,
+	dl *downloader.Manager,
+	q *queue.Manager,
+	log *slog.Logger,
+	web fs.FS,
+) *Server {
 	return &Server{
 		db:           db,
 		cfg:          cfg,
+		dl:           dl,
 		queue:        q,
 		log:          log,
 		web:          web,
@@ -198,6 +208,8 @@ func (s *Server) Handler() http.Handler {
 				r.Get("/admin/users", s.handleAdminListUsers)
 				r.Post("/admin/users", s.handleAdminCreateUser)
 				r.Delete("/admin/users/{id}", s.handleAdminDeleteUser)
+				r.Put("/admin/cookies", s.handleAdminPutCookies)
+				r.Delete("/admin/cookies", s.handleAdminDeleteCookies)
 			})
 		})
 	})

@@ -70,6 +70,10 @@ func serve(ctx context.Context, cfg *config.Config) error {
 	}
 	defer dl.Close()
 
+	if cfg.YtdlpCookiesFile != "" {
+		dl.SetCookiesFile(cfg.YtdlpCookiesFile)
+	}
+
 	if err := bootstrapAdmin(ctx, database, log); err != nil {
 		return err
 	}
@@ -95,7 +99,7 @@ func serve(ctx context.Context, cfg *config.Config) error {
 		})
 	}
 
-	srv := server.New(database, cfg, queueMgr, log, web.DistDirFS)
+	srv := server.New(database, cfg, dl, queueMgr, log, web.DistDirFS)
 
 	httpSrv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),
@@ -332,7 +336,6 @@ func runDownload(
 		SponsorBlock:  job.SponsorBlock,
 		WriteInfoJSON: true,
 		Stderr:        &stderrBuf,
-		CookiesFile:   cfg.YtdlpCookiesFile,
 	}
 	timeout := time.Duration(cfg.DownloadTimeoutHours) * time.Hour
 	dlCtx, dlCancel := context.WithTimeout(ctx, timeout)
