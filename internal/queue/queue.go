@@ -63,14 +63,14 @@ func New(ctx context.Context, worker WorkerFunc, log *slog.Logger) *Manager {
 }
 
 // Enqueue adds job to the user's queue, starting a worker goroutine if one is
-// not already running for that user. It is a no-op if Wait has been called or
-// the context is already cancelled.
-func (m *Manager) Enqueue(job Job) {
+// not already running for that user. It returns false (without queuing the job)
+// when the manager is closing or the context is cancelled.
+func (m *Manager) Enqueue(job Job) bool {
 	m.mu.Lock()
 	if m.closing || m.ctx.Err() != nil {
 		m.mu.Unlock()
 		m.log.Warn("enqueue dropped: manager closed", "user_id", job.UserID, "job_id", job.ID)
-		return
+		return false
 	}
 	uq, ok := m.queues[job.UserID]
 	if !ok {
@@ -81,8 +81,10 @@ func (m *Manager) Enqueue(job Job) {
 
 	select {
 	case uq.ch <- job:
+		return true
 	case <-m.ctx.Done():
 		m.log.Warn("enqueue dropped: context cancelled", "user_id", job.UserID, "job_id", job.ID)
+		return false
 	}
 }
 

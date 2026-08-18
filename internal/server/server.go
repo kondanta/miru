@@ -460,14 +460,17 @@ func (s *Server) handleCreateDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.queue.Enqueue(queue.Job{
+	if !s.queue.Enqueue(queue.Job{
 		ID:           id,
 		UserID:       claims.Subject,
 		YoutubeID:    youtubeID,
 		URL:          req.URL,
 		Quality:      quality,
 		SponsorBlock: userSponsorBlock == 1,
-	})
+	}) {
+		writeJSON(w, http.StatusServiceUnavailable, errBody("server is shutting down, try again"))
+		return
+	}
 
 	writeJSON(w, http.StatusAccepted, downloadRecord{
 		ID:           id,

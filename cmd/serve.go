@@ -188,7 +188,7 @@ func runDownload(
 	log *slog.Logger,
 	job queue.Job,
 ) error {
-	outDir := filepath.Join(cfg.DownloadsDir, job.YoutubeID)
+	outDir := filepath.Join(cfg.DownloadsDir, job.ID)
 	if err := os.MkdirAll(outDir, 0o750); err != nil {
 		return fmt.Errorf("create output dir: %w", err)
 	}
@@ -233,7 +233,9 @@ func runDownload(
 	if err != nil {
 		return fmt.Errorf("create poster file: %w", err)
 	}
-	fetchErr := nfo.FetchPoster(ctx, posterFile, info, nil, int64(*cfg.NFO.MaxPosterBytes))
+	posterCtx, posterCancel := context.WithTimeout(ctx, 30*time.Second)
+	fetchErr := nfo.FetchPoster(posterCtx, posterFile, info, nil, int64(*cfg.NFO.MaxPosterBytes))
+	posterCancel()
 	_ = posterFile.Close()
 	if fetchErr != nil {
 		_ = os.Remove(posterPath)
@@ -242,8 +244,7 @@ func runDownload(
 
 	videoPath, err := findVideoFile(outDir)
 	if err != nil {
-		log.Warn("could not locate video file", "job_id", job.ID, "err", err)
-		videoPath = outDir
+		return fmt.Errorf("find video file: %w", err)
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339)

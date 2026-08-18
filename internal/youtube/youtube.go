@@ -26,7 +26,7 @@ func ExtractVideoID(rawURL string) (string, error) {
 	switch u.Host {
 	case "www.youtube.com", "youtube.com", "m.youtube.com":
 		switch {
-		case strings.HasPrefix(u.Path, "/watch"):
+		case u.Path == "/watch":
 			id = u.Query().Get("v")
 		case strings.HasPrefix(u.Path, "/shorts/"):
 			id = firstPathSegment(strings.TrimPrefix(u.Path, "/shorts/"))

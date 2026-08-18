@@ -26,6 +26,7 @@ func TestExtractVideoID(t *testing.T) {
 		{"ftp scheme", "ftp://youtube.com/watch?v=dQw4w9WgXcQ", "", true},
 		{"invalid id length", "https://www.youtube.com/watch?v=short", "", true},
 		{"invalid id chars", "https://www.youtube.com/watch?v=dQw4w9WgX!Q", "", true},
+		{"watchlist path", "https://www.youtube.com/watchlist?v=dQw4w9WgXcQ", "", true},
 		{"empty string", "", "", true},
 	}
 
