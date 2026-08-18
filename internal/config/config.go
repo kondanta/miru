@@ -71,6 +71,14 @@ type Config struct {
 	HTTPProxy  string `toml:"http_proxy"`
 	HTTPSProxy string `toml:"https_proxy"`
 	NoProxy    string `toml:"no_proxy"`
+
+	// TrustProxy controls whether miru reads X-Forwarded-For / X-Real-IP headers
+	// to resolve the real client IP. Set true when running behind a trusted reverse
+	// proxy (Nginx, Envoy, Kubernetes Gateway). Leave false for direct-exposed
+	// deployments (bare docker run) where trusting those headers would let clients
+	// spoof their IP.
+	// Env: MIRU_TRUST_PROXY.
+	TrustProxy bool `toml:"trust_proxy"`
 }
 
 // NFOConfig controls NFO metadata generation behaviour.
@@ -217,6 +225,29 @@ func parseFile(path string) (*Config, error) {
 // base; env vars win. Any env var present for a section (OIDC, Google, Jellyfin)
 // initialises that section so partial configuration is caught by validate.
 func applyEnv(cfg *Config) error {
+	if err := applyBasicEnv(cfg); err != nil {
+		return err
+	}
+
+	applyCookiesEnv(cfg)
+	if err := applyProxyEnv(cfg); err != nil {
+		return err
+	}
+
+	if err := applyWatchLaterEnv(cfg); err != nil {
+		return err
+	}
+	if err := applyNFOEnv(cfg); err != nil {
+		return err
+	}
+	applyOIDCEnv(cfg)
+	applyGoogleEnv(cfg)
+	applyJellyfinEnv(cfg)
+
+	return nil
+}
+
+func applyBasicEnv(cfg *Config) error {
 	if v := os.Getenv("MIRU_DATA_DIR"); v != "" {
 		cfg.DataDir = v
 	}
@@ -247,20 +278,6 @@ func applyEnv(cfg *Config) error {
 		}
 		cfg.DownloadTimeoutHours = h
 	}
-
-	applyCookiesEnv(cfg)
-	applyProxyEnv(cfg)
-
-	if err := applyWatchLaterEnv(cfg); err != nil {
-		return err
-	}
-	if err := applyNFOEnv(cfg); err != nil {
-		return err
-	}
-	applyOIDCEnv(cfg)
-	applyGoogleEnv(cfg)
-	applyJellyfinEnv(cfg)
-
 	return nil
 }
 
@@ -270,7 +287,7 @@ func applyCookiesEnv(cfg *Config) {
 	}
 }
 
-func applyProxyEnv(cfg *Config) {
+func applyProxyEnv(cfg *Config) error {
 	if v := os.Getenv("MIRU_HTTP_PROXY"); v != "" {
 		cfg.HTTPProxy = v
 	}
@@ -280,6 +297,14 @@ func applyProxyEnv(cfg *Config) {
 	if v := os.Getenv("MIRU_NO_PROXY"); v != "" {
 		cfg.NoProxy = v
 	}
+	if v := os.Getenv("MIRU_TRUST_PROXY"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("MIRU_TRUST_PROXY %q: must be true or false", v)
+		}
+		cfg.TrustProxy = b
+	}
+	return nil
 }
 
 func applyWatchLaterEnv(cfg *Config) error {

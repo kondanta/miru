@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -320,9 +321,32 @@ func (s *Server) logger(next http.Handler) http.Handler {
 			"path", r.URL.Path,
 			"status", rw.status,
 			"duration", time.Since(start),
+			"ip", realIP(r, s.cfg.TrustProxy),
 			"request_id", r.Context().Value(keyRequestID),
 		)
 	})
+}
+
+// realIP returns the client IP for r. When trustProxy is true it reads
+// X-Forwarded-For (first entry) or X-Real-IP, as set by a trusted reverse
+// proxy (Nginx, Envoy, Kubernetes Gateway). When false it uses r.RemoteAddr
+// directly, preventing clients from spoofing their address via headers.
+func realIP(r *http.Request, trustProxy bool) string {
+	if trustProxy {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			// X-Forwarded-For may be a comma-separated list; leftmost is the client.
+			first, _, _ := strings.Cut(xff, ",")
+			return strings.TrimSpace(first)
+		}
+		if xri := r.Header.Get("X-Real-IP"); xri != "" {
+			return strings.TrimSpace(xri)
+		}
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }
 
 // authenticate verifies the Bearer JWT, checks token_version against the DB,
