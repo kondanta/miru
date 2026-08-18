@@ -3,10 +3,11 @@ go = "1.26.5"
 golangci-lint = "2.12.2"
 goreleaser = "2.17.1"
 zizmor = "1.29.0"
+deno = "2.9.5"
 
 [tasks.build]
 description = "Build the miru binary"
-run = "go build ./..."
+run = "go build -o miru ."
 
 [tasks.build-ui]
 description = "Build the Vue 3 SPA — path TBD when frontend is scaffolded"

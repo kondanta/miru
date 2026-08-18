@@ -163,6 +163,10 @@ func (s *Server) Handler() http.Handler {
 		r.Get("/auth/oidc/login", s.handleOIDCLogin)
 		r.Get("/auth/oidc/callback", s.handleOIDCCallback)
 
+		// OAuth callback — Google redirects the browser here without a JWT.
+		// The user is identified via the state parameter set in handleWatchLaterAuth.
+		r.Get("/watch-later/auth/callback", s.handleWatchLaterAuthCallback)
+
 		// All routes below require a valid JWT.
 		r.Group(func(r chi.Router) {
 			r.Use(s.authenticate)
@@ -178,8 +182,8 @@ func (s *Server) Handler() http.Handler {
 
 			r.Get("/watch-later", s.handleGetWatchLater)
 			r.Put("/watch-later", s.handlePutWatchLater)
+			r.Delete("/watch-later", s.handleDeleteWatchLater)
 			r.Get("/watch-later/auth", s.handleWatchLaterAuth)
-			r.Get("/watch-later/auth/callback", s.handleWatchLaterAuthCallback)
 
 			r.Get("/webhooks", s.handleListWebhooks)
 			r.Post("/webhooks", s.handleCreateWebhook)
@@ -349,14 +353,6 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 }
 
 // --- Stub handlers (subsystems not yet implemented) ---
-
-// Watch Later
-func (s *Server) handleGetWatchLater(w http.ResponseWriter, _ *http.Request)  { notImplemented(w) }
-func (s *Server) handlePutWatchLater(w http.ResponseWriter, _ *http.Request)  { notImplemented(w) }
-func (s *Server) handleWatchLaterAuth(w http.ResponseWriter, _ *http.Request) { notImplemented(w) }
-func (s *Server) handleWatchLaterAuthCallback(w http.ResponseWriter, _ *http.Request) {
-	notImplemented(w)
-}
 
 // Webhooks
 func (s *Server) handleListWebhooks(w http.ResponseWriter, _ *http.Request)  { notImplemented(w) }

@@ -38,6 +38,8 @@ type DownloadOpts struct {
 	SponsorBlock  bool
 	WriteInfoJSON bool      // set true when the nfo package will consume the output
 	Stderr        io.Writer // if nil, stderr is discarded; set to capture error output
+	Verbose       bool      // passes --verbose to yt-dlp; use for debugging
+	CookiesFile   string    // path to a Netscape-format cookies file; passed as --cookies
 }
 
 // Manager owns the yt-dlp binary lifecycle and invocation.
@@ -47,7 +49,7 @@ type Manager struct {
 	pinnedVersion  string // empty or "latest" = always track latest; any other value pins that tag
 	httpClient     *http.Client
 	log            *slog.Logger
-	mu             sync.RWMutex // guards the binary on disk and pinnedVersion during updates
+	mu             sync.RWMutex // guards the binary on disk and pinnedVersion
 	wg             sync.WaitGroup
 }
 
@@ -208,6 +210,14 @@ func (m *Manager) Download(
 		args = append(args, "--write-info-json")
 	}
 
+	if opts.Verbose {
+		args = append(args, "--verbose")
+	}
+
+	if opts.CookiesFile != "" {
+		args = append(args, "--cookies", opts.CookiesFile)
+	}
+
 	// "--" separates yt-dlp flags from the URL so a URL beginning with "-"
 	// cannot be parsed as a flag by yt-dlp.
 	args = append(args, "--", rawURL)
@@ -220,6 +230,8 @@ func (m *Manager) Download(
 	if stderr == nil {
 		stderr = io.Discard
 	}
+
+	m.log.Debug("yt-dlp invocation", "args", args, "path", os.Getenv("PATH"))
 
 	m.mu.RLock()
 	cmd := exec.CommandContext(ctx, m.binPath, args...)

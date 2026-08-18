@@ -27,6 +27,15 @@ type Job struct {
 	URL          string
 	Quality      string
 	SponsorBlock bool
+
+	// PlaylistItemID is the YouTube playlistItems resource ID for Watch Later
+	// sourced downloads. Empty for manually submitted downloads. When set, the
+	// worker deletes this item from the WL playlist after a successful download.
+	PlaylistItemID string
+
+	// WLRetryCount is the current failure count for WL-sourced downloads.
+	// The poller increments it on each failure and stops retrying at 5.
+	WLRetryCount int
 }
 
 // WorkerFunc processes one job. It is responsible for updating the job's
