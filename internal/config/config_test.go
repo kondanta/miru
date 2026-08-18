@@ -298,11 +298,11 @@ func TestLoad_NFODefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.NFO.MaxTags != 10 {
-		t.Errorf("MaxTags: got %d, want 10", cfg.NFO.MaxTags)
+	if *cfg.NFO.MaxTags != 10 {
+		t.Errorf("MaxTags: got %d, want 10", *cfg.NFO.MaxTags)
 	}
-	if cfg.NFO.MaxPosterBytes != 10*MB {
-		t.Errorf("MaxPosterBytes: got %d, want %d", cfg.NFO.MaxPosterBytes, 10*MB)
+	if *cfg.NFO.MaxPosterBytes != 10*MB {
+		t.Errorf("MaxPosterBytes: got %d, want %d", *cfg.NFO.MaxPosterBytes, 10*MB)
 	}
 }
 
@@ -316,8 +316,8 @@ func TestLoad_NFOMaxTagsEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.NFO.MaxTags != 25 {
-		t.Errorf("MaxTags: got %d, want 25", cfg.NFO.MaxTags)
+	if *cfg.NFO.MaxTags != 25 {
+		t.Errorf("MaxTags: got %d, want 25", *cfg.NFO.MaxTags)
 	}
 }
 
@@ -343,8 +343,8 @@ func TestLoad_NFOMaxPosterBytesEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.NFO.MaxPosterBytes != 20*MB {
-		t.Errorf("MaxPosterBytes: got %d, want %d", cfg.NFO.MaxPosterBytes, 20*MB)
+	if *cfg.NFO.MaxPosterBytes != 20*MB {
+		t.Errorf("MaxPosterBytes: got %d, want %d", *cfg.NFO.MaxPosterBytes, 20*MB)
 	}
 }
 
@@ -361,8 +361,8 @@ max_poster_bytes = "1GB"
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.NFO.MaxPosterBytes != GB {
-		t.Errorf("MaxPosterBytes: got %d, want %d (1 GiB)", cfg.NFO.MaxPosterBytes, GB)
+	if *cfg.NFO.MaxPosterBytes != GB {
+		t.Errorf("MaxPosterBytes: got %d, want %d (1 GiB)", *cfg.NFO.MaxPosterBytes, GB)
 	}
 }
 
@@ -380,8 +380,44 @@ max_poster_bytes = 10485760
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.NFO.MaxPosterBytes != 10*MB {
-		t.Errorf("MaxPosterBytes: got %d, want %d (10 MiB)", cfg.NFO.MaxPosterBytes, 10*MB)
+	if *cfg.NFO.MaxPosterBytes != 10*MB {
+		t.Errorf("MaxPosterBytes: got %d, want %d (10 MiB)", *cfg.NFO.MaxPosterBytes, 10*MB)
+	}
+}
+
+func TestLoad_NFOMaxTagsTomlZero(t *testing.T) {
+	path := writeConfig(t, `
+data_dir = "/data"
+downloads_dir = "/downloads"
+jwt_secret = "`+testSecret+`"
+[nfo]
+max_tags = 0
+`)
+
+	_, err := Load(context.Background(), path)
+	if err == nil {
+		t.Fatal("expected error for TOML max_tags=0, got nil")
+	}
+	if !strings.Contains(err.Error(), "nfo.max_tags") {
+		t.Errorf("error %q does not mention nfo.max_tags", err)
+	}
+}
+
+func TestLoad_NFOMaxPosterBytesTomlZero(t *testing.T) {
+	path := writeConfig(t, `
+data_dir = "/data"
+downloads_dir = "/downloads"
+jwt_secret = "`+testSecret+`"
+[nfo]
+max_poster_bytes = 0
+`)
+
+	_, err := Load(context.Background(), path)
+	if err == nil {
+		t.Fatal("expected error for TOML max_poster_bytes=0, got nil")
+	}
+	if !strings.Contains(err.Error(), "nfo.max_poster_bytes") {
+		t.Errorf("error %q does not mention nfo.max_poster_bytes", err)
 	}
 }
 

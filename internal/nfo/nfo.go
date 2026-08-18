@@ -8,6 +8,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"time"
@@ -20,7 +21,7 @@ type Info struct {
 	Description string   `json:"description"`
 	Channel     string   `json:"channel"`
 	UploadDate  string   `json:"upload_date"` // YYYYMMDD
-	Duration    int      `json:"duration"`    // seconds
+	Duration    float64  `json:"duration"`    // seconds; float64 because yt-dlp can return fractional values
 	Thumbnail   string   `json:"thumbnail"`   // best thumbnail URL chosen by yt-dlp
 	Tags        []string `json:"tags"`
 	Categories  []string `json:"categories"`
@@ -52,7 +53,7 @@ func (info *Info) runtimeMinutes() int {
 	if info.Duration <= 0 {
 		return 0
 	}
-	return (info.Duration + 59) / 60
+	return int(math.Ceil(info.Duration / 60))
 }
 
 // movie is the XML structure for a Jellyfin movie.nfo file.
@@ -143,7 +144,12 @@ func FetchPoster(ctx context.Context, w io.Writer, info *Info, client *http.Clie
 	}
 
 	// Read maxBytes+1 to detect oversized responses before writing to w.
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
+	// Guard against int64 overflow when maxBytes is near MaxInt64.
+	limit := maxBytes + 1
+	if limit <= 0 {
+		limit = maxBytes
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, limit))
 	if err != nil {
 		return fmt.Errorf("nfo: fetch poster: read: %w", err)
 	}

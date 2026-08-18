@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -36,12 +37,14 @@ type Config struct {
 }
 
 // NFOConfig controls NFO metadata generation behaviour.
+// Pointer fields distinguish "not set" (nil → default applies) from
+// "explicitly set to zero" (non-nil → validation rejects it).
 type NFOConfig struct {
 	// MaxTags caps how many yt-dlp tags are written to the NFO file.
-	MaxTags int `toml:"max_tags"`
+	MaxTags *int `toml:"max_tags"`
 	// MaxPosterBytes is the maximum size of a downloaded poster image.
 	// Accepts human-readable values like "10MB", "1GiB", or a plain integer (bytes).
-	MaxPosterBytes ByteSize `toml:"max_poster_bytes"`
+	MaxPosterBytes *ByteSize `toml:"max_poster_bytes"`
 }
 
 // ByteSize is an int64 that can be unmarshalled from human-readable strings like
@@ -93,6 +96,10 @@ func parseByteSize(s string) (ByteSize, error) {
 			n, err := strconv.ParseInt(numStr, 10, 64)
 			if err != nil || n < 0 {
 				return 0, fmt.Errorf("invalid byte size %q", s)
+			}
+			// Guard against int64 overflow before multiplying.
+			if u.size > 1 && n > math.MaxInt64/int64(u.size) {
+				return 0, fmt.Errorf("invalid byte size %q: value too large", s)
 			}
 			return ByteSize(n) * u.size, nil
 		}
@@ -209,7 +216,7 @@ func applyNFOEnv(cfg *Config) error {
 		if err != nil || n < 1 {
 			return fmt.Errorf("MIRU_NFO_MAX_TAGS %q: must be a positive integer", v)
 		}
-		cfg.NFO.MaxTags = n
+		cfg.NFO.MaxTags = &n
 	}
 	if v := os.Getenv("MIRU_NFO_MAX_POSTER_BYTES"); v != "" {
 		n, err := parseByteSize(v)
@@ -219,7 +226,7 @@ func applyNFOEnv(cfg *Config) error {
 		if n < 1 {
 			return fmt.Errorf("MIRU_NFO_MAX_POSTER_BYTES must be >= 1 byte")
 		}
-		cfg.NFO.MaxPosterBytes = n
+		cfg.NFO.MaxPosterBytes = &n
 	}
 	return nil
 }
@@ -289,11 +296,13 @@ func applyDefaults(cfg *Config) {
 	if cfg.LogLevel == "" {
 		cfg.LogLevel = DefaultLogLevel
 	}
-	if cfg.NFO.MaxTags == 0 {
-		cfg.NFO.MaxTags = 10
+	if cfg.NFO.MaxTags == nil {
+		v := 10
+		cfg.NFO.MaxTags = &v
 	}
-	if cfg.NFO.MaxPosterBytes == 0 {
-		cfg.NFO.MaxPosterBytes = 10 * MB
+	if cfg.NFO.MaxPosterBytes == nil {
+		v := 10 * MB
+		cfg.NFO.MaxPosterBytes = &v
 	}
 }
 
@@ -322,10 +331,10 @@ func (cfg *Config) validate() error {
 		errs = append(errs, fmt.Sprintf("log_level %q must be one of: debug, info, warn, error", cfg.LogLevel))
 	}
 
-	if cfg.NFO.MaxTags < 1 {
+	if *cfg.NFO.MaxTags < 1 {
 		errs = append(errs, "nfo.max_tags must be >= 1")
 	}
-	if cfg.NFO.MaxPosterBytes < 1 {
+	if *cfg.NFO.MaxPosterBytes < 1 {
 		errs = append(errs, "nfo.max_poster_bytes must be >= 1 byte")
 	}
 

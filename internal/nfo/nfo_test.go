@@ -162,6 +162,39 @@ func TestWriteNFO(t *testing.T) {
 	}
 }
 
+func TestWriteNFO_FractionalDuration(t *testing.T) {
+	// yt-dlp can emit fractional durations like 90.5; Info.Duration is float64
+	// and runtimeMinutes must handle them without a JSON decode error.
+	const fractionalJSON = `{
+	  "id": "abc123",
+	  "title": "Short clip",
+	  "duration": 90.5,
+	  "tags": [],
+	  "categories": []
+	}`
+
+	info, err := nfo.Parse(strings.NewReader(fractionalJSON))
+	if err != nil {
+		t.Fatalf("Parse fractional duration: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if err := nfo.WriteNFO(&buf, info, 10); err != nil {
+		t.Fatalf("WriteNFO: %v", err)
+	}
+
+	type xmlMovie struct {
+		Runtime int `xml:"runtime"`
+	}
+	var m xmlMovie
+	if err := xml.NewDecoder(&buf).Decode(&m); err != nil {
+		t.Fatalf("decode NFO XML: %v", err)
+	}
+	if m.Runtime != 2 { // ceil(90.5/60) = 2
+		t.Errorf("runtime: got %d, want 2", m.Runtime)
+	}
+}
+
 func TestWriteNFO_NoThumb(t *testing.T) {
 	info, err := nfo.Parse(strings.NewReader(
 		`{"id":"abc","title":"t","thumbnail":"","tags":[],"categories":[]}`,
