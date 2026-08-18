@@ -18,8 +18,10 @@ import (
 // githubReleasesBaseURL is the base GitHub API path for yt-dlp releases.
 const githubReleasesBaseURL = "https://api.github.com/repos/yt-dlp/yt-dlp/releases"
 
-// qualityFormats maps user-facing quality strings to yt-dlp format selectors.
-var qualityFormats = map[string]string{
+// QualityFormats maps user-facing quality strings to yt-dlp format selectors.
+// It is the canonical source of valid quality values; the server imports it to
+// validate quality fields without duplicating the set.
+var QualityFormats = map[string]string{
 	"best":  "bestvideo+bestaudio/best",
 	"360p":  "bestvideo[height<=360]+bestaudio/best[height<=360]",
 	"480p":  "bestvideo[height<=480]+bestaudio/best[height<=480]",
@@ -180,7 +182,7 @@ func (m *Manager) SetVersion(ctx context.Context, tag string) error {
 func (m *Manager) Download(
 	ctx context.Context, rawURL, outDir string, opts DownloadOpts, progress io.Writer,
 ) error {
-	format, ok := qualityFormats[opts.Quality]
+	format, ok := QualityFormats[opts.Quality]
 	if !ok {
 		return fmt.Errorf("unknown quality %q", opts.Quality)
 	}
