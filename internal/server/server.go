@@ -16,9 +16,11 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 	"github.com/kondanta/miru/internal/auth"
 	"github.com/kondanta/miru/internal/config"
 	"github.com/kondanta/miru/internal/queue"
+	"github.com/kondanta/miru/internal/youtube"
 )
 
 type contextKey int
@@ -334,10 +336,183 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, _ *http.Request) { no
 func (s *Server) handleGetUser(w http.ResponseWriter, _ *http.Request)   { notImplemented(w) }
 func (s *Server) handlePatchUser(w http.ResponseWriter, _ *http.Request) { notImplemented(w) }
 
+// validQualities mirrors the format selectors supported by the downloader.
+var validQualities = map[string]bool{
+	"best": true, "360p": true, "480p": true, "720p": true,
+	"1080p": true, "1440p": true, "2160p": true, "4320p": true,
+}
+
+// downloadRecord is the API representation of a downloads row.
+type downloadRecord struct {
+	ID           string `json:"id"`
+	YoutubeID    string `json:"youtube_id"`
+	Title        string `json:"title"`
+	Status       string `json:"status"`
+	Quality      string `json:"quality"`
+	SponsorBlock bool   `json:"sponsorblock"`
+	Source       string `json:"source"`
+	FilePath     string `json:"file_path,omitempty"`
+	CreatedAt    string `json:"created_at"`
+	UpdatedAt    string `json:"updated_at"`
+}
+
+func (s *Server) handleListDownloads(w http.ResponseWriter, r *http.Request) {
+	claims, _ := r.Context().Value(keyClaims).(*auth.Claims)
+
+	rows, err := s.db.QueryContext(r.Context(), `
+		SELECT id, youtube_id, title, status, quality, sponsorblock, source,
+		       COALESCE(file_path, ''), created_at, updated_at
+		FROM downloads
+		WHERE user_id = ?
+		ORDER BY created_at DESC
+		LIMIT 100`,
+		claims.Subject,
+	)
+	if err != nil {
+		s.log.Error("list downloads query", "err", err)
+		writeJSON(w, http.StatusInternalServerError, errBody("internal server error"))
+		return
+	}
+	defer func() { _ = rows.Close() }()
+
+	downloads := make([]downloadRecord, 0)
+	for rows.Next() {
+		var d downloadRecord
+		var sponsorblock int
+		if err := rows.Scan(
+			&d.ID, &d.YoutubeID, &d.Title, &d.Status, &d.Quality,
+			&sponsorblock, &d.Source, &d.FilePath, &d.CreatedAt, &d.UpdatedAt,
+		); err != nil {
+			s.log.Error("scan download row", "err", err)
+			writeJSON(w, http.StatusInternalServerError, errBody("internal server error"))
+			return
+		}
+		d.SponsorBlock = sponsorblock == 1
+		downloads = append(downloads, d)
+	}
+	if err := rows.Err(); err != nil {
+		s.log.Error("downloads rows error", "err", err)
+		writeJSON(w, http.StatusInternalServerError, errBody("internal server error"))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, downloads)
+}
+
+type createDownloadRequest struct {
+	URL     string `json:"url"`
+	Quality string `json:"quality"`
+}
+
+func (s *Server) handleCreateDownload(w http.ResponseWriter, r *http.Request) {
+	claims, _ := r.Context().Value(keyClaims).(*auth.Claims)
+
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
+	var req createDownloadRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody("invalid request body"))
+		return
+	}
+	if req.URL == "" {
+		writeJSON(w, http.StatusBadRequest, errBody("url is required"))
+		return
+	}
+	if req.Quality != "" && !validQualities[req.Quality] {
+		writeJSON(
+			w,
+			http.StatusBadRequest,
+			errBody("invalid quality; accepted: best, 360p, 480p, 720p, 1080p, 1440p, 2160p, 4320p"),
+		)
+		return
+	}
+
+	youtubeID, err := youtube.ExtractVideoID(req.URL)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody("invalid YouTube URL"))
+		return
+	}
+
+	// Fetch user preferences; quality from request overrides the default.
+	var userQuality string
+	var userSponsorBlock int
+	if err := s.db.QueryRowContext(r.Context(),
+		`SELECT quality, sponsorblock FROM users WHERE id = ?`, claims.Subject,
+	).Scan(&userQuality, &userSponsorBlock); err != nil {
+		s.log.Error("fetch user prefs", "err", err)
+		writeJSON(w, http.StatusInternalServerError, errBody("internal server error"))
+		return
+	}
+	quality := req.Quality
+	if quality == "" {
+		quality = userQuality
+	}
+
+	id := uuid.NewString()
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := s.db.ExecContext(r.Context(), `
+		INSERT INTO downloads
+		  (id, user_id, youtube_id, title, status, quality, sponsorblock, source, created_at, updated_at)
+		VALUES (?, ?, ?, ?, 'queued', ?, ?, 'manual', ?, ?)`,
+		id, claims.Subject, youtubeID, req.URL, quality, userSponsorBlock, now, now,
+	); err != nil {
+		s.log.Error("insert download", "err", err)
+		writeJSON(w, http.StatusInternalServerError, errBody("internal server error"))
+		return
+	}
+
+	s.queue.Enqueue(queue.Job{
+		ID:           id,
+		UserID:       claims.Subject,
+		YoutubeID:    youtubeID,
+		URL:          req.URL,
+		Quality:      quality,
+		SponsorBlock: userSponsorBlock == 1,
+	})
+
+	writeJSON(w, http.StatusAccepted, downloadRecord{
+		ID:           id,
+		YoutubeID:    youtubeID,
+		Title:        req.URL,
+		Status:       "queued",
+		Quality:      quality,
+		SponsorBlock: userSponsorBlock == 1,
+		Source:       "manual",
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	})
+}
+
+func (s *Server) handleGetDownload(w http.ResponseWriter, r *http.Request) {
+	claims, _ := r.Context().Value(keyClaims).(*auth.Claims)
+	id := chi.URLParam(r, "id")
+
+	var d downloadRecord
+	var sponsorblock int
+	err := s.db.QueryRowContext(r.Context(), `
+		SELECT id, youtube_id, title, status, quality, sponsorblock, source,
+		       COALESCE(file_path, ''), created_at, updated_at
+		FROM downloads
+		WHERE id = ? AND user_id = ?`,
+		id, claims.Subject,
+	).Scan(
+		&d.ID, &d.YoutubeID, &d.Title, &d.Status, &d.Quality,
+		&sponsorblock, &d.Source, &d.FilePath, &d.CreatedAt, &d.UpdatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeJSON(w, http.StatusNotFound, errBody("download not found"))
+		return
+	}
+	if err != nil {
+		s.log.Error("get download", "err", err)
+		writeJSON(w, http.StatusInternalServerError, errBody("internal server error"))
+		return
+	}
+	d.SponsorBlock = sponsorblock == 1
+
+	writeJSON(w, http.StatusOK, d)
+}
+
 // Downloads
-func (s *Server) handleListDownloads(w http.ResponseWriter, _ *http.Request)  { notImplemented(w) }
-func (s *Server) handleCreateDownload(w http.ResponseWriter, _ *http.Request) { notImplemented(w) }
-func (s *Server) handleGetDownload(w http.ResponseWriter, _ *http.Request)    { notImplemented(w) }
 func (s *Server) handleDeleteDownload(w http.ResponseWriter, _ *http.Request) { notImplemented(w) }
 
 // Watch Later

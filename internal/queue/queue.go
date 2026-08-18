@@ -22,6 +22,7 @@ const (
 type Job struct {
 	ID           string
 	UserID       string
+	YoutubeID    string
 	URL          string
 	Quality      string
 	SponsorBlock bool
