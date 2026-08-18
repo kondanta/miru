@@ -29,9 +29,80 @@ type Config struct {
 	Port         int       `toml:"port"`
 	LogLevel     string    `toml:"log_level"`
 	JWTSecret    string    `toml:"jwt_secret"`
+	NFO          NFOConfig `toml:"nfo"`
 	OIDC         *OIDC     `toml:"oidc"`
 	Google       *Google   `toml:"google"`
 	Jellyfin     *Jellyfin `toml:"jellyfin"`
+}
+
+// NFOConfig controls NFO metadata generation behaviour.
+type NFOConfig struct {
+	// MaxTags caps how many yt-dlp tags are written to the NFO file.
+	MaxTags int `toml:"max_tags"`
+	// MaxPosterBytes is the maximum size of a downloaded poster image.
+	// Accepts human-readable values like "10MB", "1GiB", or a plain integer (bytes).
+	MaxPosterBytes ByteSize `toml:"max_poster_bytes"`
+}
+
+// ByteSize is an int64 that can be unmarshalled from human-readable strings like
+// "10MB", "1GiB", or a plain integer (interpreted as bytes). It is used in
+// config fields that represent data sizes.
+type ByteSize int64
+
+const (
+	_  = iota
+	KB = ByteSize(1 << (10 * iota))
+	MB
+	GB
+	TB
+)
+
+func (b *ByteSize) UnmarshalText(text []byte) error {
+	n, err := parseByteSize(string(text))
+	if err != nil {
+		return err
+	}
+	*b = n
+	return nil
+}
+
+// parseByteSize parses strings like "10MB", "1GiB", "500B", or "10485760".
+// KB/MB/GB/TB and KiB/MiB/GiB/TiB are all treated as powers of 1024.
+func parseByteSize(s string) (ByteSize, error) {
+	s = strings.TrimSpace(s)
+	upper := strings.ToUpper(s)
+
+	units := []struct {
+		suffix string
+		size   ByteSize
+	}{
+		{"TIB", TB},
+		{"GIB", GB},
+		{"MIB", MB},
+		{"KIB", KB},
+		{"TB", TB},
+		{"GB", GB},
+		{"MB", MB},
+		{"KB", KB},
+		{"B", 1},
+	}
+
+	for _, u := range units {
+		if strings.HasSuffix(upper, u.suffix) {
+			numStr := strings.TrimSpace(s[:len(s)-len(u.suffix)])
+			n, err := strconv.ParseInt(numStr, 10, 64)
+			if err != nil || n < 0 {
+				return 0, fmt.Errorf("invalid byte size %q", s)
+			}
+			return ByteSize(n) * u.size, nil
+		}
+	}
+
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid byte size %q: use a number or a suffix like MB, GB", s)
+	}
+	return ByteSize(n), nil
 }
 
 type OIDC struct {
@@ -122,10 +193,34 @@ func applyEnv(cfg *Config) error {
 		cfg.JWTSecret = v
 	}
 
+	if err := applyNFOEnv(cfg); err != nil {
+		return err
+	}
 	applyOIDCEnv(cfg)
 	applyGoogleEnv(cfg)
 	applyJellyfinEnv(cfg)
 
+	return nil
+}
+
+func applyNFOEnv(cfg *Config) error {
+	if v := os.Getenv("MIRU_NFO_MAX_TAGS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return fmt.Errorf("MIRU_NFO_MAX_TAGS %q: must be a positive integer", v)
+		}
+		cfg.NFO.MaxTags = n
+	}
+	if v := os.Getenv("MIRU_NFO_MAX_POSTER_BYTES"); v != "" {
+		n, err := parseByteSize(v)
+		if err != nil {
+			return fmt.Errorf("MIRU_NFO_MAX_POSTER_BYTES: %w", err)
+		}
+		if n < 1 {
+			return fmt.Errorf("MIRU_NFO_MAX_POSTER_BYTES must be >= 1 byte")
+		}
+		cfg.NFO.MaxPosterBytes = n
+	}
 	return nil
 }
 
@@ -194,6 +289,12 @@ func applyDefaults(cfg *Config) {
 	if cfg.LogLevel == "" {
 		cfg.LogLevel = DefaultLogLevel
 	}
+	if cfg.NFO.MaxTags == 0 {
+		cfg.NFO.MaxTags = 10
+	}
+	if cfg.NFO.MaxPosterBytes == 0 {
+		cfg.NFO.MaxPosterBytes = 10 * MB
+	}
 }
 
 var validLogLevels = map[string]bool{
@@ -219,6 +320,13 @@ func (cfg *Config) validate() error {
 	}
 	if !validLogLevels[cfg.LogLevel] {
 		errs = append(errs, fmt.Sprintf("log_level %q must be one of: debug, info, warn, error", cfg.LogLevel))
+	}
+
+	if cfg.NFO.MaxTags < 1 {
+		errs = append(errs, "nfo.max_tags must be >= 1")
+	}
+	if cfg.NFO.MaxPosterBytes < 1 {
+		errs = append(errs, "nfo.max_poster_bytes must be >= 1 byte")
 	}
 
 	errs = append(errs, validateOIDC(cfg.OIDC)...)
