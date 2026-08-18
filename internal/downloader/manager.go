@@ -213,6 +213,7 @@ func (m *Manager) Download(
 	args := []string{
 		"--newline",
 		"--no-playlist",
+		"--extractor-args", "youtube:player_client=android",
 		"--format", format,
 		"--merge-output-format", "mp4",
 		"--output", "%(upload_date>%Y-%m-%d)s - %(title)s.%(ext)s",

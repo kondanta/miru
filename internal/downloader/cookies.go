@@ -18,11 +18,16 @@ func WriteNetscapeCookies(raw, domain, outPath string) error {
 		return fmt.Errorf("create output directory: %w", err)
 	}
 
-	tmpPath := outPath + ".tmp"
-	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	f, err := os.CreateTemp(filepath.Dir(outPath), ".cookies-*.tmp")
 	if err != nil {
 		return fmt.Errorf("create cookies file: %w", err)
 	}
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		return fmt.Errorf("set cookies file permissions: %w", err)
+	}
+	tmpPath := f.Name()
 
 	w := bufio.NewWriter(f)
 	for _, line := range []string{
