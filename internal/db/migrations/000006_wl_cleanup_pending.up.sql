@@ -1,0 +1,1 @@
+ALTER TABLE downloads ADD COLUMN wl_cleanup_pending INTEGER NOT NULL DEFAULT 0;

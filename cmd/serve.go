@@ -283,28 +283,26 @@ func newWorker(database *sql.DB, dl *downloader.Manager, cfg *config.Config, log
 		}
 
 		// Delete the Watch Later playlist item after a successful download.
+		// On transient failure, mark wl_cleanup_pending=1 so the poller retries
+		// the delete on the next poll cycle without re-running the download.
 		if job.PlaylistItemID != "" && cfg.Google != nil {
 			oauthCfg := youtube.OAuthConfig(
 				cfg.Google.ClientID,
 				cfg.Google.ClientSecret,
 				youtube.RedirectURI(cfg.BaseURL),
 			)
-			tok, err := youtube.LoadToken(ctx, database, []byte(cfg.EncryptionKey), job.UserID)
-			if err != nil {
-				log.Warn("worker: load token for WL delete", "job_id", job.ID, "err", err)
-			} else {
-				client := youtube.TokenClient(ctx, oauthCfg, tok)
-				if err := youtube.DeletePlaylistItem(ctx, client, job.PlaylistItemID); err != nil {
-					log.Warn(
-						"worker: delete playlist item",
-						"job_id",
-						job.ID,
-						"item_id",
-						job.PlaylistItemID,
-						"err",
-						err,
-					)
+			deleteErr := func() error {
+				tok, err := youtube.LoadToken(ctx, database, []byte(cfg.EncryptionKey), job.UserID)
+				if err != nil {
+					return err
 				}
+				client := youtube.TokenClient(ctx, oauthCfg, tok)
+				return youtube.DeletePlaylistItem(ctx, client, job.PlaylistItemID)
+			}()
+			if deleteErr != nil {
+				log.Warn("worker: delete playlist item failed, will retry on next poll",
+					"job_id", job.ID, "item_id", job.PlaylistItemID, "err", deleteErr)
+				markCleanupPending(database, job.ID, log)
 			}
 		}
 		return nil
@@ -349,6 +347,7 @@ func runDownload(
 		SponsorBlock:  job.SponsorBlock,
 		WriteInfoJSON: true,
 		Stderr:        &stderrBuf,
+		Verbose:       cfg.LogLevel == "debug",
 	}
 	timeout := time.Duration(cfg.DownloadTimeoutHours) * time.Hour
 	dlCtx, dlCancel := context.WithTimeout(ctx, timeout)
@@ -426,6 +425,16 @@ func markFailed(database *sql.DB, downloadID string, log *slog.Logger) {
 		`UPDATE downloads SET status='failed', updated_at=? WHERE id=?`, now, downloadID,
 	); err != nil {
 		log.Error("mark download failed: db error", "download_id", downloadID, "err", err)
+	}
+}
+
+func markCleanupPending(database *sql.DB, downloadID string, log *slog.Logger) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := database.ExecContext(ctx,
+		`UPDATE downloads SET wl_cleanup_pending=1 WHERE id=?`, downloadID,
+	); err != nil {
+		log.Error("mark cleanup pending: db error", "download_id", downloadID, "err", err)
 	}
 }
 

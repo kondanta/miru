@@ -11,16 +11,18 @@ import (
 // WriteNetscapeCookies parses a Cookie header value (e.g. copied from browser
 // DevTools) and writes a Netscape-format cookies file at outPath. All cookies
 // are written with the given domain (typically ".youtube.com").
+// The file is written to a sibling temp path then atomically renamed so a
+// concurrent yt-dlp invocation never observes a partial file.
 func WriteNetscapeCookies(raw, domain, outPath string) error {
 	if err := os.MkdirAll(filepath.Dir(outPath), 0o750); err != nil {
 		return fmt.Errorf("create output directory: %w", err)
 	}
 
-	f, err := os.OpenFile(outPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	tmpPath := outPath + ".tmp"
+	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("create cookies file: %w", err)
 	}
-	defer func() { _ = f.Close() }()
 
 	w := bufio.NewWriter(f)
 	for _, line := range []string{
@@ -29,6 +31,8 @@ func WriteNetscapeCookies(raw, domain, outPath string) error {
 		"",
 	} {
 		if _, err := fmt.Fprintln(w, line); err != nil {
+			_ = f.Close()
+			_ = os.Remove(tmpPath)
 			return fmt.Errorf("write cookies header: %w", err)
 		}
 	}
@@ -45,11 +49,27 @@ func WriteNetscapeCookies(raw, domain, outPath string) error {
 			continue
 		}
 		// Fields: domain  include_subdomains  path  secure  expiry  name  value
+		// secure=TRUE: YouTube is HTTPS-only; cookies must not be sent over plain HTTP.
 		// expiry=0 → session cookie; yt-dlp treats 0 as valid.
-		if _, err := fmt.Fprintf(w, "%s\tTRUE\t/\tFALSE\t0\t%s\t%s\n", domain, name, value); err != nil {
+		if _, err := fmt.Fprintf(w, "%s\tTRUE\t/\tTRUE\t0\t%s\t%s\n", domain, name, value); err != nil {
+			_ = f.Close()
+			_ = os.Remove(tmpPath)
 			return fmt.Errorf("write cookie %q: %w", name, err)
 		}
 	}
 
-	return w.Flush()
+	if err := w.Flush(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("flush cookies file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("close cookies file: %w", err)
+	}
+	if err := os.Rename(tmpPath, outPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("install cookies file: %w", err)
+	}
+	return nil
 }

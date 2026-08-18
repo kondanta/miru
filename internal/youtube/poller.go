@@ -146,6 +146,8 @@ func pollUser(ctx context.Context, d PollDeps, userID, quality, playlistID strin
 		now.Format(time.RFC3339), userID,
 	)
 
+	retryPendingCleanup(ctx, d, userID, tok)
+
 	for _, item := range items {
 		queued, err := enqueueIfNew(ctx, d, userID, quality, item)
 		switch {
@@ -155,6 +157,67 @@ func pollUser(ctx context.Context, d PollDeps, userID, quality, playlistID strin
 			d.Log.Info("wl poller: queued", "user_id", userID, "video_id", item.VideoID, "title", item.Title)
 		default:
 			d.Log.Debug("wl poller: skipped", "user_id", userID, "video_id", item.VideoID)
+		}
+	}
+}
+
+// retryPendingCleanup deletes YouTube playlist items for completed downloads
+// that were flagged wl_cleanup_pending=1 due to a transient failure in the
+// worker. Clears the flag on success; leaves it set for the next poll cycle
+// on failure. Runs under the same per-user token the regular poll already
+// loaded — no extra auth round-trip needed.
+func retryPendingCleanup(ctx context.Context, d PollDeps, userID string, tok Token) {
+	rows, err := d.DB.QueryContext(ctx, `
+		SELECT id, playlist_item_id FROM downloads
+		WHERE user_id=? AND status='done' AND wl_cleanup_pending=1
+		  AND playlist_item_id IS NOT NULL AND playlist_item_id != ''`,
+		userID,
+	)
+	if err != nil {
+		d.Log.Error("wl poller: query pending cleanup", "user_id", userID, "err", err)
+		return
+	}
+
+	type pendingRow struct {
+		id             string
+		playlistItemID string
+	}
+	var pending []pendingRow
+	func() {
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var r pendingRow
+			if err := rows.Scan(&r.id, &r.playlistItemID); err != nil {
+				d.Log.Error("wl poller: scan pending cleanup", "user_id", userID, "err", err)
+				return
+			}
+			pending = append(pending, r)
+		}
+		if err := rows.Err(); err != nil {
+			d.Log.Error("wl poller: iterate pending cleanup", "user_id", userID, "err", err)
+		}
+	}()
+
+	if len(pending) == 0 {
+		return
+	}
+
+	apiCtx, apiCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer apiCancel()
+	client := TokenClient(apiCtx, d.OAuthCfg, tok)
+
+	for _, r := range pending {
+		if err := DeletePlaylistItem(apiCtx, client, r.playlistItemID); err != nil {
+			d.Log.Warn("wl poller: cleanup retry failed", "download_id", r.id,
+				"item_id", r.playlistItemID, "err", err)
+			continue
+		}
+		if _, err := d.DB.ExecContext(ctx,
+			`UPDATE downloads SET wl_cleanup_pending=0 WHERE id=?`, r.id,
+		); err != nil {
+			d.Log.Error("wl poller: clear cleanup pending", "download_id", r.id, "err", err)
+		} else {
+			d.Log.Info("wl poller: cleanup retry succeeded", "download_id", r.id, "item_id", r.playlistItemID)
 		}
 	}
 }

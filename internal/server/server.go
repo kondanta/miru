@@ -136,15 +136,33 @@ type oauthStateStore struct {
 	entries map[string]oauthStateEntry
 }
 
+// maxOAuthStates caps pending OAuth state entries per store instance.
+// Each entry expires in 5 minutes; this limit prevents a DoS where an
+// authenticated user spams /watch-later/auth to inflate memory unboundedly.
+const maxOAuthStates = 50
+
 func (s *oauthStateStore) create(userID string) (string, error) {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
 		return "", fmt.Errorf("generate oauth state: %w", err)
 	}
 	state := hex.EncodeToString(b)
+
 	s.mu.Lock()
-	s.entries[state] = oauthStateEntry{userID: userID, expiresAt: time.Now().Add(5 * time.Minute)}
-	s.mu.Unlock()
+	defer s.mu.Unlock()
+
+	// Prune expired entries before inserting so the cap is not consumed by stale state.
+	now := time.Now()
+	for k, e := range s.entries {
+		if now.After(e.expiresAt) {
+			delete(s.entries, k)
+		}
+	}
+	if len(s.entries) >= maxOAuthStates {
+		return "", fmt.Errorf("too many pending OAuth authorizations; try again shortly")
+	}
+
+	s.entries[state] = oauthStateEntry{userID: userID, expiresAt: now.Add(5 * time.Minute)}
 	return state, nil
 }
 

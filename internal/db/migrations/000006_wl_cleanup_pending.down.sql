@@ -1,0 +1,3 @@
+-- wl_cleanup_pending was added to downloads with ALTER TABLE.
+-- SQLite does not support DROP COLUMN before 3.35.0; the column is left in
+-- place on down (same approach as 000004_watch_later_v2.down.sql).

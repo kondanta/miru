@@ -2,8 +2,10 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/kondanta/miru/internal/downloader"
 	"github.com/spf13/cobra"
@@ -13,22 +15,22 @@ func cookiesCmd() *cobra.Command {
 	var output, dataDir string
 
 	cmd := &cobra.Command{
-		Use:   "cookies COOKIE_HEADER",
+		Use:   "cookies",
 		Short: "Write YouTube browser cookies to a Netscape-format file",
-		Long: `Parse a Cookie header value copied from browser DevTools and write it to a
-Netscape-format cookies file for use with MIRU_YTDLP_COOKIES_FILE.
+		Long: `Read a Cookie header value from stdin and write it to a Netscape-format
+cookies file for use with MIRU_YTDLP_COOKIES_FILE. Reading from stdin
+keeps the session cookie out of shell history and process listings.
 
 How to get the Cookie header:
   1. Open YouTube in your browser and log in.
   2. Open DevTools → Network tab → reload the page.
-  3. Click XHR to filter requests.
-  4. Click any youtube.com request → Headers → find the "Cookie:" request header.
-  5. Copy everything after "Cookie: " and pass it as the argument to this command.
+  3. Click any youtube.com request → Headers → find "Cookie:" under request headers.
+  4. Copy everything after "Cookie: " and pipe it to this command.
 
 Example:
-  miru cookies "VISITOR_INFO1_LIVE=abc; SID=def; ..."`,
-		Args: cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
+  echo "VISITOR_INFO1_LIVE=abc; SID=def; ..." | miru cookies`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			if dataDir == "" {
 				dataDir = os.Getenv("MIRU_DATA_DIR")
 			}
@@ -39,7 +41,15 @@ Example:
 				output = filepath.Join(dataDir, "cookies.txt")
 			}
 
-			raw := args[0]
+			rawBytes, err := io.ReadAll(os.Stdin)
+			if err != nil {
+				return fmt.Errorf("read cookies from stdin: %w", err)
+			}
+			raw := strings.TrimRight(string(rawBytes), "\r\n")
+			if raw == "" {
+				return fmt.Errorf("no cookie data on stdin")
+			}
+
 			if err := downloader.WriteNetscapeCookies(raw, ".youtube.com", output); err != nil {
 				return err
 			}
