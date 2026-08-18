@@ -25,15 +25,16 @@ const (
 )
 
 type Config struct {
-	DataDir      string    `toml:"data_dir"`
-	DownloadsDir string    `toml:"downloads_dir"`
-	Port         int       `toml:"port"`
-	LogLevel     string    `toml:"log_level"`
-	JWTSecret    string    `toml:"jwt_secret"`
-	NFO          NFOConfig `toml:"nfo"`
-	OIDC         *OIDC     `toml:"oidc"`
-	Google       *Google   `toml:"google"`
-	Jellyfin     *Jellyfin `toml:"jellyfin"`
+	DataDir              string    `toml:"data_dir"`
+	DownloadsDir         string    `toml:"downloads_dir"`
+	Port                 int       `toml:"port"`
+	LogLevel             string    `toml:"log_level"`
+	JWTSecret            string    `toml:"jwt_secret"`
+	DownloadTimeoutHours int       `toml:"download_timeout_hours"`
+	NFO                  NFOConfig `toml:"nfo"`
+	OIDC                 *OIDC     `toml:"oidc"`
+	Google               *Google   `toml:"google"`
+	Jellyfin             *Jellyfin `toml:"jellyfin"`
 }
 
 // NFOConfig controls NFO metadata generation behaviour.
@@ -199,6 +200,13 @@ func applyEnv(cfg *Config) error {
 	if v := os.Getenv("MIRU_JWT_SECRET"); v != "" {
 		cfg.JWTSecret = v
 	}
+	if v := os.Getenv("MIRU_DOWNLOAD_TIMEOUT_HOURS"); v != "" {
+		h, err := strconv.Atoi(v)
+		if err != nil || h < 1 {
+			return fmt.Errorf("MIRU_DOWNLOAD_TIMEOUT_HOURS %q: must be a positive integer", v)
+		}
+		cfg.DownloadTimeoutHours = h
+	}
 
 	if err := applyNFOEnv(cfg); err != nil {
 		return err
@@ -295,6 +303,9 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.LogLevel == "" {
 		cfg.LogLevel = DefaultLogLevel
+	}
+	if cfg.DownloadTimeoutHours == 0 {
+		cfg.DownloadTimeoutHours = 6
 	}
 	if cfg.NFO.MaxTags == nil {
 		v := 10

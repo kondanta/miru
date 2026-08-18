@@ -245,14 +245,15 @@ func runDownload(
 		return fmt.Errorf("create output dir: %w", err)
 	}
 
-	var stderrBuf bytes.Buffer
+	var stderrBuf limitWriter
 	opts := downloader.DownloadOpts{
 		Quality:       job.Quality,
 		SponsorBlock:  job.SponsorBlock,
 		WriteInfoJSON: true,
 		Stderr:        &stderrBuf,
 	}
-	dlCtx, dlCancel := context.WithTimeout(ctx, 6*time.Hour)
+	timeout := time.Duration(cfg.DownloadTimeoutHours) * time.Hour
+	dlCtx, dlCancel := context.WithTimeout(ctx, timeout)
 	dlErr := dl.Download(dlCtx, job.URL, outDir, opts, io.Discard)
 	dlCancel()
 	if dlErr != nil {
@@ -359,6 +360,27 @@ func findVideoFile(dir string) (string, error) {
 	}
 	return "", fmt.Errorf("no video file found in %s", dir)
 }
+
+// limitWriter is a write-once bounded buffer that discards bytes beyond max.
+// Used to capture yt-dlp stderr without unbounded memory growth.
+type limitWriter struct {
+	buf bytes.Buffer
+}
+
+const stderrCap = 4 * 1024 // 4 KB is plenty for yt-dlp error messages
+
+func (lw *limitWriter) Write(p []byte) (int, error) {
+	remaining := stderrCap - lw.buf.Len()
+	if remaining <= 0 {
+		return len(p), nil
+	}
+	if len(p) > remaining {
+		p = p[:remaining]
+	}
+	return lw.buf.Write(p)
+}
+
+func (lw *limitWriter) String() string { return lw.buf.String() }
 
 func newLogger(level string) *slog.Logger {
 	var l slog.Level
