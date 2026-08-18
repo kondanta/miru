@@ -62,6 +62,15 @@ type Config struct {
 	// is server-wide and applies to all users' downloads.
 	// Env: MIRU_YTDLP_COOKIES_FILE.
 	YtdlpCookiesFile string `toml:"ytdlp_cookies_file"`
+
+	// HTTPProxy, HTTPSProxy, NoProxy are MIRU-namespaced proxy settings.
+	// At startup miru sets HTTP_PROXY/HTTPS_PROXY/NO_PROXY from these values so
+	// all Go HTTP clients and yt-dlp inherit them without requiring a separate
+	// system-level proxy configuration.
+	// Envs: MIRU_HTTP_PROXY, MIRU_HTTPS_PROXY, MIRU_NO_PROXY.
+	HTTPProxy  string `toml:"http_proxy"`
+	HTTPSProxy string `toml:"https_proxy"`
+	NoProxy    string `toml:"no_proxy"`
 }
 
 // NFOConfig controls NFO metadata generation behaviour.
@@ -240,6 +249,7 @@ func applyEnv(cfg *Config) error {
 	}
 
 	applyCookiesEnv(cfg)
+	applyProxyEnv(cfg)
 
 	if err := applyWatchLaterEnv(cfg); err != nil {
 		return err
@@ -257,6 +267,18 @@ func applyEnv(cfg *Config) error {
 func applyCookiesEnv(cfg *Config) {
 	if v := os.Getenv("MIRU_YTDLP_COOKIES_FILE"); v != "" {
 		cfg.YtdlpCookiesFile = v
+	}
+}
+
+func applyProxyEnv(cfg *Config) {
+	if v := os.Getenv("MIRU_HTTP_PROXY"); v != "" {
+		cfg.HTTPProxy = v
+	}
+	if v := os.Getenv("MIRU_HTTPS_PROXY"); v != "" {
+		cfg.HTTPSProxy = v
+	}
+	if v := os.Getenv("MIRU_NO_PROXY"); v != "" {
+		cfg.NoProxy = v
 	}
 }
 

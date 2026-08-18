@@ -74,6 +74,19 @@ func serve(ctx context.Context, cfg *config.Config) error {
 		dl.SetCookiesFile(cfg.YtdlpCookiesFile)
 	}
 
+	// Export MIRU proxy config as standard env vars so Go's http.ProxyFromEnvironment
+	// and child processes (yt-dlp) pick them up without additional per-client wiring.
+	// Only set when non-empty to avoid overriding system env vars the user didn't intend to clear.
+	if cfg.HTTPProxy != "" {
+		_ = os.Setenv("HTTP_PROXY", cfg.HTTPProxy)
+	}
+	if cfg.HTTPSProxy != "" {
+		_ = os.Setenv("HTTPS_PROXY", cfg.HTTPSProxy)
+	}
+	if cfg.NoProxy != "" {
+		_ = os.Setenv("NO_PROXY", cfg.NoProxy)
+	}
+
 	if err := bootstrapAdmin(ctx, database, log); err != nil {
 		return err
 	}
