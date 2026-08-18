@@ -31,6 +31,7 @@ func Execute() {
 	)
 
 	rootCmd.AddCommand(serveCmd(&configPath))
+	rootCmd.AddCommand(cookiesCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)

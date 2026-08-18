@@ -1,3 +1,5 @@
+FROM denoland/deno:bin-2.9.5 AS deno
+
 FROM golang:1.26.6-alpine AS builder
 WORKDIR /build
 
@@ -19,6 +21,7 @@ RUN apk add --no-cache ca-certificates tzdata \
 
 WORKDIR /app
 COPY --from=builder /build/miru /app/miru
+COPY --from=deno /deno /usr/local/bin/deno
 
 USER miru
 EXPOSE 8090

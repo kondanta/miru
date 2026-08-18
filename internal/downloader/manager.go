@@ -38,6 +38,7 @@ type DownloadOpts struct {
 	SponsorBlock  bool
 	WriteInfoJSON bool      // set true when the nfo package will consume the output
 	Stderr        io.Writer // if nil, stderr is discarded; set to capture error output
+	Verbose       bool      // passes --verbose to yt-dlp; use for debugging
 }
 
 // Manager owns the yt-dlp binary lifecycle and invocation.
@@ -47,8 +48,26 @@ type Manager struct {
 	pinnedVersion  string // empty or "latest" = always track latest; any other value pins that tag
 	httpClient     *http.Client
 	log            *slog.Logger
-	mu             sync.RWMutex // guards the binary on disk and pinnedVersion during updates
+	mu             sync.RWMutex // guards the binary on disk, pinnedVersion, and cookiesFile
 	wg             sync.WaitGroup
+
+	cookiesFile string // Netscape-format cookies file path; empty means no cookies
+}
+
+// SetCookiesFile sets the path to a Netscape-format cookies file passed to
+// every yt-dlp invocation. Safe to call concurrently; takes effect on the next
+// download. Pass an empty string to disable cookies.
+func (m *Manager) SetCookiesFile(path string) {
+	m.mu.Lock()
+	m.cookiesFile = path
+	m.mu.Unlock()
+}
+
+// CookiesFile returns the currently configured cookies file path.
+func (m *Manager) CookiesFile() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.cookiesFile
 }
 
 // New creates a Manager that stores the yt-dlp binary inside dataDir.
@@ -194,6 +213,7 @@ func (m *Manager) Download(
 	args := []string{
 		"--newline",
 		"--no-playlist",
+		"--extractor-args", "youtube:player_client=android",
 		"--format", format,
 		"--merge-output-format", "mp4",
 		"--output", "%(upload_date>%Y-%m-%d)s - %(title)s.%(ext)s",
@@ -208,6 +228,17 @@ func (m *Manager) Download(
 		args = append(args, "--write-info-json")
 	}
 
+	if opts.Verbose {
+		args = append(args, "--verbose")
+	}
+
+	m.mu.RLock()
+	cookiesFile := m.cookiesFile
+	m.mu.RUnlock()
+	if cookiesFile != "" {
+		args = append(args, "--cookies", cookiesFile)
+	}
+
 	// "--" separates yt-dlp flags from the URL so a URL beginning with "-"
 	// cannot be parsed as a flag by yt-dlp.
 	args = append(args, "--", rawURL)
@@ -220,6 +251,8 @@ func (m *Manager) Download(
 	if stderr == nil {
 		stderr = io.Discard
 	}
+
+	m.log.Debug("yt-dlp invocation", "args", args, "path", os.Getenv("PATH"))
 
 	m.mu.RLock()
 	cmd := exec.CommandContext(ctx, m.binPath, args...)

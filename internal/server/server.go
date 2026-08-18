@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -19,6 +20,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/kondanta/miru/internal/auth"
 	"github.com/kondanta/miru/internal/config"
+	"github.com/kondanta/miru/internal/downloader"
 	"github.com/kondanta/miru/internal/queue"
 )
 
@@ -124,26 +126,91 @@ func (l *loginLimiter) clearFailures(username string) {
 	delete(l.buckets, username)
 }
 
+type oauthStateEntry struct {
+	userID    string
+	expiresAt time.Time
+}
+
+type oauthStateStore struct {
+	mu      sync.Mutex
+	entries map[string]oauthStateEntry
+}
+
+// maxOAuthStates caps pending OAuth state entries per store instance.
+// Each entry expires in 5 minutes; this limit prevents a DoS where an
+// authenticated user spams /watch-later/auth to inflate memory unboundedly.
+const maxOAuthStates = 50
+
+func (s *oauthStateStore) create(userID string) (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate oauth state: %w", err)
+	}
+	state := hex.EncodeToString(b)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Prune expired entries before inserting so the cap is not consumed by stale state.
+	now := time.Now()
+	for k, e := range s.entries {
+		if now.After(e.expiresAt) {
+			delete(s.entries, k)
+		}
+	}
+	if len(s.entries) >= maxOAuthStates {
+		return "", fmt.Errorf("too many pending OAuth authorizations; try again shortly")
+	}
+
+	s.entries[state] = oauthStateEntry{userID: userID, expiresAt: now.Add(5 * time.Minute)}
+	return state, nil
+}
+
+func (s *oauthStateStore) consume(state string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.entries[state]
+	if !ok {
+		return "", false
+	}
+	delete(s.entries, state)
+	if time.Now().After(entry.expiresAt) {
+		return "", false
+	}
+	return entry.userID, true
+}
+
 // Server holds shared dependencies for all HTTP handlers.
 type Server struct {
 	db           *sql.DB
 	cfg          *config.Config
+	dl           *downloader.Manager
 	queue        *queue.Manager
 	log          *slog.Logger
 	web          fs.FS
 	loginLimiter *loginLimiter
+	oauthStates  *oauthStateStore
 }
 
 // New creates a Server. web is the embedded SPA filesystem (may be nil to
 // disable the catch-all SPA route during tests).
-func New(db *sql.DB, cfg *config.Config, q *queue.Manager, log *slog.Logger, web fs.FS) *Server {
+func New(
+	db *sql.DB,
+	cfg *config.Config,
+	dl *downloader.Manager,
+	q *queue.Manager,
+	log *slog.Logger,
+	web fs.FS,
+) *Server {
 	return &Server{
 		db:           db,
 		cfg:          cfg,
+		dl:           dl,
 		queue:        q,
 		log:          log,
 		web:          web,
 		loginLimiter: newLoginLimiter(10, 10, 10*time.Minute),
+		oauthStates:  &oauthStateStore{entries: make(map[string]oauthStateEntry)},
 	}
 }
 
@@ -163,6 +230,10 @@ func (s *Server) Handler() http.Handler {
 		r.Get("/auth/oidc/login", s.handleOIDCLogin)
 		r.Get("/auth/oidc/callback", s.handleOIDCCallback)
 
+		// OAuth callback — Google redirects the browser here without a JWT.
+		// The user is identified via the state parameter set in handleWatchLaterAuth.
+		r.Get("/watch-later/auth/callback", s.handleWatchLaterAuthCallback)
+
 		// All routes below require a valid JWT.
 		r.Group(func(r chi.Router) {
 			r.Use(s.authenticate)
@@ -178,8 +249,8 @@ func (s *Server) Handler() http.Handler {
 
 			r.Get("/watch-later", s.handleGetWatchLater)
 			r.Put("/watch-later", s.handlePutWatchLater)
+			r.Delete("/watch-later", s.handleDeleteWatchLater)
 			r.Get("/watch-later/auth", s.handleWatchLaterAuth)
-			r.Get("/watch-later/auth/callback", s.handleWatchLaterAuthCallback)
 
 			r.Get("/webhooks", s.handleListWebhooks)
 			r.Post("/webhooks", s.handleCreateWebhook)
@@ -194,6 +265,8 @@ func (s *Server) Handler() http.Handler {
 				r.Get("/admin/users", s.handleAdminListUsers)
 				r.Post("/admin/users", s.handleAdminCreateUser)
 				r.Delete("/admin/users/{id}", s.handleAdminDeleteUser)
+				r.Put("/admin/cookies", s.handleAdminPutCookies)
+				r.Delete("/admin/cookies", s.handleAdminDeleteCookies)
 			})
 		})
 	})
@@ -266,9 +339,32 @@ func (s *Server) logger(next http.Handler) http.Handler {
 			"path", r.URL.Path,
 			"status", rw.status,
 			"duration", time.Since(start),
+			"ip", realIP(r, s.cfg.TrustProxy),
 			"request_id", r.Context().Value(keyRequestID),
 		)
 	})
+}
+
+// realIP returns the client IP for r. When trustProxy is true it reads
+// X-Forwarded-For (first entry) or X-Real-IP, as set by a trusted reverse
+// proxy (Nginx, Envoy, Kubernetes Gateway). When false it uses r.RemoteAddr
+// directly, preventing clients from spoofing their address via headers.
+func realIP(r *http.Request, trustProxy bool) string {
+	if trustProxy {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			// X-Forwarded-For may be a comma-separated list; leftmost is the client.
+			first, _, _ := strings.Cut(xff, ",")
+			return strings.TrimSpace(first)
+		}
+		if xri := r.Header.Get("X-Real-IP"); xri != "" {
+			return strings.TrimSpace(xri)
+		}
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }
 
 // authenticate verifies the Bearer JWT, checks token_version against the DB,
@@ -349,14 +445,6 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 }
 
 // --- Stub handlers (subsystems not yet implemented) ---
-
-// Watch Later
-func (s *Server) handleGetWatchLater(w http.ResponseWriter, _ *http.Request)  { notImplemented(w) }
-func (s *Server) handlePutWatchLater(w http.ResponseWriter, _ *http.Request)  { notImplemented(w) }
-func (s *Server) handleWatchLaterAuth(w http.ResponseWriter, _ *http.Request) { notImplemented(w) }
-func (s *Server) handleWatchLaterAuthCallback(w http.ResponseWriter, _ *http.Request) {
-	notImplemented(w)
-}
 
 // Webhooks
 func (s *Server) handleListWebhooks(w http.ResponseWriter, _ *http.Request)  { notImplemented(w) }

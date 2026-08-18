@@ -32,6 +32,10 @@ type downloadRecord struct {
 	FilePath     string `json:"file_path,omitempty"`
 	CreatedAt    string `json:"created_at"`
 	UpdatedAt    string `json:"updated_at"`
+	// WLRetryCount is non-zero only for watch_later sourced items. The UI shows
+	// an alert when this reaches MaxWLRetries (5) — the poller has given up and
+	// the video remains in the user's YouTube Watch Later playlist.
+	WLRetryCount int `json:"wl_retry_count"`
 }
 
 func (s *Server) handleListDownloads(w http.ResponseWriter, r *http.Request) {
@@ -42,7 +46,7 @@ func (s *Server) handleListDownloads(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := s.db.QueryContext(r.Context(), `
 		SELECT id, youtube_id, title, status, quality, sponsorblock, source,
-		       COALESCE(file_path, ''), created_at, updated_at
+		       COALESCE(file_path, ''), created_at, updated_at, wl_retry_count
 		FROM downloads
 		WHERE user_id = ?
 		ORDER BY created_at DESC
@@ -62,7 +66,7 @@ func (s *Server) handleListDownloads(w http.ResponseWriter, r *http.Request) {
 		var sponsorblock int
 		if err := rows.Scan(
 			&d.ID, &d.YoutubeID, &d.Title, &d.Status, &d.Quality,
-			&sponsorblock, &d.Source, &d.FilePath, &d.CreatedAt, &d.UpdatedAt,
+			&sponsorblock, &d.Source, &d.FilePath, &d.CreatedAt, &d.UpdatedAt, &d.WLRetryCount,
 		); err != nil {
 			s.log.Error("scan download row", "err", err)
 			writeJSON(w, http.StatusInternalServerError, errBody("internal server error"))
@@ -186,13 +190,13 @@ func (s *Server) handleGetDownload(w http.ResponseWriter, r *http.Request) {
 	var sponsorblock int
 	err := s.db.QueryRowContext(r.Context(), `
 		SELECT id, youtube_id, title, status, quality, sponsorblock, source,
-		       COALESCE(file_path, ''), created_at, updated_at
+		       COALESCE(file_path, ''), created_at, updated_at, wl_retry_count
 		FROM downloads
 		WHERE id = ? AND user_id = ?`,
 		id, claims.Subject,
 	).Scan(
 		&d.ID, &d.YoutubeID, &d.Title, &d.Status, &d.Quality,
-		&sponsorblock, &d.Source, &d.FilePath, &d.CreatedAt, &d.UpdatedAt,
+		&sponsorblock, &d.Source, &d.FilePath, &d.CreatedAt, &d.UpdatedAt, &d.WLRetryCount,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeJSON(w, http.StatusNotFound, errBody("download not found"))

@@ -25,6 +25,7 @@ import (
 	"github.com/kondanta/miru/internal/nfo"
 	"github.com/kondanta/miru/internal/queue"
 	"github.com/kondanta/miru/internal/server"
+	"github.com/kondanta/miru/internal/youtube"
 	"github.com/kondanta/miru/web"
 	"github.com/spf13/cobra"
 )
@@ -69,6 +70,23 @@ func serve(ctx context.Context, cfg *config.Config) error {
 	}
 	defer dl.Close()
 
+	if cfg.YtdlpCookiesFile != "" {
+		dl.SetCookiesFile(cfg.YtdlpCookiesFile)
+	}
+
+	// Export MIRU proxy config as standard env vars so Go's http.ProxyFromEnvironment
+	// and child processes (yt-dlp) pick them up without additional per-client wiring.
+	// Only set when non-empty to avoid overriding system env vars the user didn't intend to clear.
+	if cfg.HTTPProxy != "" {
+		_ = os.Setenv("HTTP_PROXY", cfg.HTTPProxy)
+	}
+	if cfg.HTTPSProxy != "" {
+		_ = os.Setenv("HTTPS_PROXY", cfg.HTTPSProxy)
+	}
+	if cfg.NoProxy != "" {
+		_ = os.Setenv("NO_PROXY", cfg.NoProxy)
+	}
+
 	if err := bootstrapAdmin(ctx, database, log); err != nil {
 		return err
 	}
@@ -79,7 +97,22 @@ func serve(ctx context.Context, cfg *config.Config) error {
 		return fmt.Errorf("reconcile downloads: %w", err)
 	}
 
-	srv := server.New(database, cfg, queueMgr, log, web.DistDirFS)
+	if cfg.Google != nil {
+		oauthCfg := youtube.OAuthConfig(
+			cfg.Google.ClientID,
+			cfg.Google.ClientSecret,
+			youtube.RedirectURI(cfg.BaseURL),
+		)
+		go youtube.RunPoller(ctx, youtube.PollDeps{
+			DB:       database,
+			EncKey:   []byte(cfg.EncryptionKey),
+			OAuthCfg: oauthCfg,
+			Queue:    queueMgr,
+			Log:      log,
+		})
+	}
+
+	srv := server.New(database, cfg, dl, queueMgr, log, web.DistDirFS)
 
 	httpSrv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),
@@ -174,8 +207,10 @@ func reconcileDownloads(ctx context.Context, database *sql.DB, q *queue.Manager,
 		return fmt.Errorf("reset downloading rows: %w", err)
 	}
 
-	rows, err := database.QueryContext(ctx,
-		`SELECT id, user_id, youtube_id, quality, sponsorblock FROM downloads WHERE status='queued'`,
+	rows, err := database.QueryContext(ctx, `
+		SELECT id, user_id, youtube_id, quality, sponsorblock,
+		       COALESCE(playlist_item_id, ''), wl_retry_count
+		FROM downloads WHERE status='queued'`,
 	)
 	if err != nil {
 		return fmt.Errorf("query queued downloads: %w", err)
@@ -187,17 +222,29 @@ func reconcileDownloads(ctx context.Context, database *sql.DB, q *queue.Manager,
 		var (
 			id, userID, youtubeID, quality string
 			sponsorblock                   int
+			playlistItemID                 string
+			wlRetryCount                   int
 		)
-		if err := rows.Scan(&id, &userID, &youtubeID, &quality, &sponsorblock); err != nil {
+		if err := rows.Scan(
+			&id,
+			&userID,
+			&youtubeID,
+			&quality,
+			&sponsorblock,
+			&playlistItemID,
+			&wlRetryCount,
+		); err != nil {
 			return fmt.Errorf("scan queued download: %w", err)
 		}
 		if q.Enqueue(queue.Job{
-			ID:           id,
-			UserID:       userID,
-			YoutubeID:    youtubeID,
-			URL:          "https://www.youtube.com/watch?v=" + youtubeID,
-			Quality:      quality,
-			SponsorBlock: sponsorblock == 1,
+			ID:             id,
+			UserID:         userID,
+			YoutubeID:      youtubeID,
+			URL:            "https://www.youtube.com/watch?v=" + youtubeID,
+			Quality:        quality,
+			SponsorBlock:   sponsorblock == 1,
+			PlaylistItemID: playlistItemID,
+			WLRetryCount:   wlRetryCount,
 		}) {
 			accepted++
 		} else {
@@ -217,6 +264,8 @@ func reconcileDownloads(ctx context.Context, database *sql.DB, q *queue.Manager,
 
 // newWorker returns the WorkerFunc that drives the full download pipeline:
 // yt-dlp → NFO generation → poster download → DB status update.
+// For Watch Later sourced jobs, on success it deletes the playlist item from
+// YouTube; on failure it increments wl_retry_count (capped at maxWLRetries).
 func newWorker(database *sql.DB, dl *downloader.Manager, cfg *config.Config, log *slog.Logger) queue.WorkerFunc {
 	return func(ctx context.Context, job queue.Job) error {
 		now := time.Now().UTC().Format(time.RFC3339)
@@ -229,11 +278,54 @@ func newWorker(database *sql.DB, dl *downloader.Manager, cfg *config.Config, log
 
 		if err := runDownload(ctx, database, dl, cfg, log, job); err != nil {
 			log.Error("download failed", "job_id", job.ID, "err", err)
-			markFailed(database, job.ID, log)
+			markFailedWL(database, job, log)
 			return err
+		}
+
+		// Delete the Watch Later playlist item after a successful download.
+		// On transient failure, mark wl_cleanup_pending=1 so the poller retries
+		// the delete on the next poll cycle without re-running the download.
+		if job.PlaylistItemID != "" && cfg.Google != nil {
+			oauthCfg := youtube.OAuthConfig(
+				cfg.Google.ClientID,
+				cfg.Google.ClientSecret,
+				youtube.RedirectURI(cfg.BaseURL),
+			)
+			deleteErr := func() error {
+				tok, err := youtube.LoadToken(ctx, database, []byte(cfg.EncryptionKey), job.UserID)
+				if err != nil {
+					return err
+				}
+				client := youtube.TokenClient(ctx, oauthCfg, tok)
+				return youtube.DeletePlaylistItem(ctx, client, job.PlaylistItemID)
+			}()
+			if deleteErr != nil {
+				log.Warn("worker: delete playlist item failed, will retry on next poll",
+					"job_id", job.ID, "item_id", job.PlaylistItemID, "err", deleteErr)
+				markCleanupPending(database, job.ID, log)
+			}
 		}
 		return nil
 	}
+}
+
+// markFailedWL marks a job failed. For WL-sourced jobs it also increments
+// wl_retry_count so the poller can stop retrying after maxWLRetries failures.
+func markFailedWL(database *sql.DB, job queue.Job, log *slog.Logger) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	now := time.Now().UTC().Format(time.RFC3339)
+	if job.PlaylistItemID != "" {
+		if _, err := database.ExecContext(ctx, `
+			UPDATE downloads
+			SET status='failed', wl_retry_count=MIN(wl_retry_count+1, ?), updated_at=?
+			WHERE id=?`, youtube.MaxWLRetries, now, job.ID,
+		); err != nil {
+			log.Error("mark wl download failed: db error", "download_id", job.ID, "err", err)
+		}
+		return
+	}
+	markFailed(database, job.ID, log)
 }
 
 func runDownload(
@@ -255,6 +347,7 @@ func runDownload(
 		SponsorBlock:  job.SponsorBlock,
 		WriteInfoJSON: true,
 		Stderr:        &stderrBuf,
+		Verbose:       cfg.LogLevel == "debug",
 	}
 	timeout := time.Duration(cfg.DownloadTimeoutHours) * time.Hour
 	dlCtx, dlCancel := context.WithTimeout(ctx, timeout)
@@ -332,6 +425,16 @@ func markFailed(database *sql.DB, downloadID string, log *slog.Logger) {
 		`UPDATE downloads SET status='failed', updated_at=? WHERE id=?`, now, downloadID,
 	); err != nil {
 		log.Error("mark download failed: db error", "download_id", downloadID, "err", err)
+	}
+}
+
+func markCleanupPending(database *sql.DB, downloadID string, log *slog.Logger) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := database.ExecContext(ctx,
+		`UPDATE downloads SET wl_cleanup_pending=1 WHERE id=?`, downloadID,
+	); err != nil {
+		log.Error("mark cleanup pending: db error", "download_id", downloadID, "err", err)
 	}
 }
 

@@ -35,6 +35,50 @@ type Config struct {
 	OIDC                 *OIDC     `toml:"oidc"`
 	Google               *Google   `toml:"google"`
 	Jellyfin             *Jellyfin `toml:"jellyfin"`
+
+	// BaseURL is the externally reachable URL miru is served on (e.g.
+	// "https://miru.example.com"). Required when Google OAuth is configured —
+	// used to construct the OAuth redirect URI.
+	BaseURL string `toml:"base_url"`
+
+	// EncryptionKey is a 32-byte (256-bit) key used to encrypt OAuth refresh
+	// tokens at rest with AES-256-GCM. Required when Google OAuth is configured.
+	// Env-only (MIRU_ENCRYPTION_KEY): no TOML tag so it cannot be written to
+	// the config file on disk.
+	// Hard rotation: changing this key makes existing tokens unreadable — affected
+	// users must disconnect and reconnect their Google account. Versioned-key
+	// rotation was considered but skipped: this is a personal single-deployment
+	// tool; the same hard-rotation semantics already apply to JWTSecret.
+	EncryptionKey string
+
+	// WatchLaterPollInterval is the server-wide default interval (minutes)
+	// between Watch Later polls. Per-user overrides are stored in the DB.
+	// Range: [1, 4320] (1 minute to 72 hours). Default: 10.
+	WatchLaterPollInterval int `toml:"watch_later_poll_interval"`
+
+	// YtdlpCookiesFile is the path to a Netscape-format cookies file passed to
+	// yt-dlp via --cookies. Optional — when set, helps bypass 403 errors on IPs
+	// flagged by YouTube. Any logged-in YouTube browser session works; the file
+	// is server-wide and applies to all users' downloads.
+	// Env: MIRU_YTDLP_COOKIES_FILE.
+	YtdlpCookiesFile string `toml:"ytdlp_cookies_file"`
+
+	// HTTPProxy, HTTPSProxy, NoProxy are MIRU-namespaced proxy settings.
+	// At startup miru sets HTTP_PROXY/HTTPS_PROXY/NO_PROXY from these values so
+	// all Go HTTP clients and yt-dlp inherit them without requiring a separate
+	// system-level proxy configuration.
+	// Envs: MIRU_HTTP_PROXY, MIRU_HTTPS_PROXY, MIRU_NO_PROXY.
+	HTTPProxy  string `toml:"http_proxy"`
+	HTTPSProxy string `toml:"https_proxy"`
+	NoProxy    string `toml:"no_proxy"`
+
+	// TrustProxy controls whether miru reads X-Forwarded-For / X-Real-IP headers
+	// to resolve the real client IP. Set true when running behind a trusted reverse
+	// proxy (Nginx, Envoy, Kubernetes Gateway). Leave false for direct-exposed
+	// deployments (bare docker run) where trusting those headers would let clients
+	// spoof their IP.
+	// Env: MIRU_TRUST_PROXY.
+	TrustProxy bool `toml:"trust_proxy"`
 }
 
 // NFOConfig controls NFO metadata generation behaviour.
@@ -181,6 +225,29 @@ func parseFile(path string) (*Config, error) {
 // base; env vars win. Any env var present for a section (OIDC, Google, Jellyfin)
 // initialises that section so partial configuration is caught by validate.
 func applyEnv(cfg *Config) error {
+	if err := applyBasicEnv(cfg); err != nil {
+		return err
+	}
+
+	applyCookiesEnv(cfg)
+	if err := applyProxyEnv(cfg); err != nil {
+		return err
+	}
+
+	if err := applyWatchLaterEnv(cfg); err != nil {
+		return err
+	}
+	if err := applyNFOEnv(cfg); err != nil {
+		return err
+	}
+	applyOIDCEnv(cfg)
+	applyGoogleEnv(cfg)
+	applyJellyfinEnv(cfg)
+
+	return nil
+}
+
+func applyBasicEnv(cfg *Config) error {
 	if v := os.Getenv("MIRU_DATA_DIR"); v != "" {
 		cfg.DataDir = v
 	}
@@ -211,14 +278,52 @@ func applyEnv(cfg *Config) error {
 		}
 		cfg.DownloadTimeoutHours = h
 	}
+	return nil
+}
 
-	if err := applyNFOEnv(cfg); err != nil {
-		return err
+func applyCookiesEnv(cfg *Config) {
+	if v := os.Getenv("MIRU_YTDLP_COOKIES_FILE"); v != "" {
+		cfg.YtdlpCookiesFile = v
 	}
-	applyOIDCEnv(cfg)
-	applyGoogleEnv(cfg)
-	applyJellyfinEnv(cfg)
+}
 
+func applyProxyEnv(cfg *Config) error {
+	if v := os.Getenv("MIRU_HTTP_PROXY"); v != "" {
+		cfg.HTTPProxy = v
+	}
+	if v := os.Getenv("MIRU_HTTPS_PROXY"); v != "" {
+		cfg.HTTPSProxy = v
+	}
+	if v := os.Getenv("MIRU_NO_PROXY"); v != "" {
+		cfg.NoProxy = v
+	}
+	if v := os.Getenv("MIRU_TRUST_PROXY"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("MIRU_TRUST_PROXY %q: must be true or false", v)
+		}
+		cfg.TrustProxy = b
+	}
+	return nil
+}
+
+func applyWatchLaterEnv(cfg *Config) error {
+	if v := os.Getenv("MIRU_BASE_URL"); v != "" {
+		cfg.BaseURL = v
+	}
+	if v := os.Getenv("MIRU_ENCRYPTION_KEY"); v != "" {
+		cfg.EncryptionKey = v
+	}
+	if v := os.Getenv("MIRU_WATCH_LATER_POLL_INTERVAL"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > maxWatchLaterPollInterval {
+			return fmt.Errorf(
+				"MIRU_WATCH_LATER_POLL_INTERVAL %q: must be an integer in [1, %d]",
+				v, maxWatchLaterPollInterval,
+			)
+		}
+		cfg.WatchLaterPollInterval = n
+	}
 	return nil
 }
 
@@ -302,6 +407,7 @@ func applyJellyfinEnv(cfg *Config) {
 }
 
 func applyDefaults(cfg *Config) {
+	cfg.BaseURL = strings.TrimRight(cfg.BaseURL, "/")
 	if cfg.Port == 0 {
 		cfg.Port = DefaultPort
 	}
@@ -319,11 +425,17 @@ func applyDefaults(cfg *Config) {
 		v := 10 * MB
 		cfg.NFO.MaxPosterBytes = &v
 	}
+	if cfg.WatchLaterPollInterval == 0 {
+		cfg.WatchLaterPollInterval = 10
+	}
 }
 
 // maxDownloadTimeoutHours is math.MaxInt64 / int64(time.Hour) — the largest
 // value that can be safely converted to time.Duration without overflow.
 const maxDownloadTimeoutHours = math.MaxInt64 / int64(3_600_000_000_000)
+
+// maxWatchLaterPollInterval is 72 hours expressed in minutes.
+const maxWatchLaterPollInterval = 72 * 60
 
 var validLogLevels = map[string]bool{
 	"debug": true, "info": true, "warn": true, "error": true,
@@ -362,8 +474,15 @@ func (cfg *Config) validate() error {
 		errs = append(errs, "nfo.max_poster_bytes must be >= 1 byte")
 	}
 
+	if cfg.WatchLaterPollInterval < 1 || cfg.WatchLaterPollInterval > maxWatchLaterPollInterval {
+		errs = append(errs, fmt.Sprintf(
+			"watch_later_poll_interval %d out of range [1, %d]",
+			cfg.WatchLaterPollInterval, maxWatchLaterPollInterval,
+		))
+	}
+
 	errs = append(errs, validateOIDC(cfg.OIDC)...)
-	errs = append(errs, validateGoogle(cfg.Google)...)
+	errs = append(errs, validateGoogle(cfg.Google, cfg.BaseURL, cfg.EncryptionKey)...)
 	errs = append(errs, validateJellyfin(cfg.Jellyfin)...)
 
 	if len(errs) > 0 {
@@ -383,14 +502,26 @@ func validateOIDC(o *OIDC) []string {
 	return nil
 }
 
-func validateGoogle(g *Google) []string {
+func validateGoogle(g *Google, baseURL, encKey string) []string {
 	if g == nil {
 		return nil
 	}
+	var errs []string
 	if g.ClientID == "" || g.ClientSecret == "" {
-		return []string{"google: client_id and client_secret must both be set"}
+		errs = append(errs, "google: client_id and client_secret must both be set")
 	}
-	return nil
+	if baseURL == "" {
+		errs = append(errs, "base_url is required when Google OAuth is configured (set MIRU_BASE_URL)")
+	} else {
+		u, err := url.Parse(baseURL)
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			errs = append(errs, fmt.Sprintf("base_url %q must be a valid http or https URL", baseURL))
+		}
+	}
+	if len(encKey) != 32 {
+		errs = append(errs, "MIRU_ENCRYPTION_KEY must be exactly 32 bytes when Google OAuth is configured")
+	}
+	return errs
 }
 
 func validateJellyfin(j *Jellyfin) []string {
