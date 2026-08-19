@@ -1,6 +1,6 @@
 FROM denoland/deno:bin-2.9.5 AS deno
 
-FROM golang:1.26.6-alpine AS builder
+FROM golang:1.27.0-alpine AS builder
 WORKDIR /build
 
 COPY go.mod go.sum ./
